@@ -7,7 +7,7 @@ pygame.init()
 
 # --- Window layout ---
 GRID_WIDTH, GRID_HEIGHT = 800, 600
-PANEL_WIDTH = 260
+PANEL_WIDTH = 320
 DASHBOARD_HEIGHT = 90
 WIDTH = GRID_WIDTH + PANEL_WIDTH
 HEIGHT = GRID_HEIGHT + DASHBOARD_HEIGHT
@@ -15,7 +15,14 @@ HEIGHT = GRID_HEIGHT + DASHBOARD_HEIGHT
 CELL_SIZE = 40
 GRID_COLS = GRID_WIDTH // CELL_SIZE
 GRID_ROWS = GRID_HEIGHT // CELL_SIZE
-GRID_LAYERS = 3
+
+# --- Altitude system: 0 to 40,000 ft in 5,000 ft steps (9 levels) ---
+ALTITUDE_STEP_FT = 5000
+GRID_LAYERS = 9
+MAX_ALTITUDE_FT = (GRID_LAYERS - 1) * ALTITUDE_STEP_FT  # 40,000
+
+def alt_ft(z_index):
+    return z_index * ALTITUDE_STEP_FT
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Adaptive Drone Flight-Path Replanner")
@@ -25,7 +32,7 @@ font = pygame.font.SysFont("Segoe UI", 20)
 font_small = pygame.font.SysFont("Segoe UI", 16)
 font_tiny = pygame.font.SysFont("Segoe UI", 13)
 
-# --- Unified color palette ---
+# --- Colors ---
 BG_COLOR = (24, 25, 33)
 GRID_COLOR = (42, 43, 56)
 START_COLOR = (86, 211, 145)
@@ -53,11 +60,14 @@ DASHBOARD_LABEL_COLOR = (140, 142, 160)
 DASHBOARD_VALUE_COLOR = (232, 232, 240)
 TEXT_MAIN = (225, 226, 235)
 LEGEND_BG_COLOR = (18, 19, 26)
+BUTTON_COLOR = (55, 57, 74)
+BUTTON_ACTIVE_COLOR = (80, 140, 210)
+BUTTON_START_COLOR = (70, 160, 110)
 
 VERTICAL_COST = 2
 ENERGY_PER_COST_UNIT = 0.5
 
-# --- Hard obstacles ---
+# --- Hard obstacles (block ALL altitudes -- e.g. terrain/buildings) ---
 obstacles_3d = set()
 
 full_obstacles_2d = [
@@ -69,56 +79,16 @@ for (col, row) in full_obstacles_2d:
     for z in range(GRID_LAYERS):
         obstacles_3d.add((col, row, z))
 
+# Wall: passable only at/above 20,000 ft (z >= 4). This is a WIDE safe
+# band (5 layers: 20k/25k/30k/35k/40k), not a single sliver -- important,
+# see the turbulence placement note below.
 WALL_COL = 12
+WALL_OPEN_MIN_Z = 4
 for row in range(GRID_ROWS):
-    obstacles_3d.add((WALL_COL, row, 0))
-    obstacles_3d.add((WALL_COL, row, 1))
+    for z in range(WALL_OPEN_MIN_Z):
+        obstacles_3d.add((WALL_COL, row, z))
 
-# --- Ash ---
-ASH_WIDTH = 4
-ASH_ROWS = range(9, 12)
-ASH_Z_MIN, ASH_Z_MAX = 0, 0
-ASH_COST_PER_STEP = 12
-
-ash_start_col = 6
-ash_drift_direction = 1
-ASH_DRIFT_MIN_COL = 2
-ASH_DRIFT_MAX_COL = GRID_COLS - ASH_WIDTH - 1
-
-ASH_TICK_INTERVAL = 45
-tick_counter = 0
-
-def get_ash_cols():
-    return range(ash_start_col, ash_start_col + ASH_WIDTH)
-
-def in_ash(cell):
-    col, row, z = cell
-    return col in get_ash_cols() and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
-
-def update_ash_drift():
-    global ash_start_col, ash_drift_direction
-    ash_start_col += ash_drift_direction
-    if ash_start_col >= ASH_DRIFT_MAX_COL:
-        ash_start_col = ASH_DRIFT_MAX_COL
-        ash_drift_direction = -1
-    elif ash_start_col <= ASH_DRIFT_MIN_COL:
-        ash_start_col = ASH_DRIFT_MIN_COL
-        ash_drift_direction = 1
-
-# --- Turbulence ---
-TURBULENCE_COLS = range(13, 19)
-TURBULENCE_ROWS = range(2, 6)
-TURB_Z_MIN, TURB_Z_MAX = 2, 2
-TURBULENCE_COST_PER_STEP = 10
-
-def in_turbulence(cell):
-    col, row, z = cell
-    return col in TURBULENCE_COLS and row in TURBULENCE_ROWS and TURB_Z_MIN <= z <= TURB_Z_MAX
-
-def in_any_hazard(cell):
-    return in_ash(cell) or in_turbulence(cell)
-
-# --- Wind ---
+# --- Wind (fixed, not configurable this round) ---
 WIND_DIRECTION = (1, 0)
 WIND_PENALTY = 3
 
@@ -129,6 +99,74 @@ def wind_cost(a, b):
     dy = b[1] - a[1]
     dot = dx * WIND_DIRECTION[0] + dy * WIND_DIRECTION[1]
     return WIND_PENALTY if dot < 0 else 0
+
+# ============================================================
+#                    GENERALIZED HAZARDS
+# ============================================================
+
+SPEED_PRESETS = [15, 30, 45, 60, 90]
+
+def make_hazard(hazard_id, htype, col_start, width, row_start, height):
+    if htype == "ash":
+        cost, color, band_color, label = 12, ASH_COLOR, PANEL_ASH_BAND_COLOR, "Ash"
+    else:
+        cost, color, band_color, label = 10, TURBULENCE_COLOR, PANEL_TURB_BAND_COLOR, "Turbulence"
+    return {
+        "id": hazard_id, "type": htype, "label": label,
+        "cost": cost, "color": color, "band_color": band_color,
+        "col_start": col_start, "width": width,
+        "row_start": row_start, "height": height,
+        "z_min": 0, "z_max": 0,
+        "drift_enabled": False, "drift_dir": 1,
+        "drift_interval": 45, "tick_counter": 0,
+    }
+
+# Default demo hazards -- deliberately placed so a safe altitude
+# corridor exists between them and the wall's open band:
+#   Wall open:    20,000 - 40,000 ft (z = 4..8)
+#   Ash:          ground level, 0 ft            (z = 0)      -> low, clear of the wall entirely
+#   Turbulence:   35,000 ft only                (z = 7)      -> high, but NOT the only wall-open altitude
+# This leaves 20k/25k/30k/40k ft as genuine hazard-free crossing options.
+hazards = [
+    make_hazard(1, "ash", col_start=6, width=4, row_start=9, height=3),
+    make_hazard(2, "turbulence", col_start=13, width=6, row_start=2, height=4),
+]
+hazards[0]["z_min"] = hazards[0]["z_max"] = 0
+hazards[0]["drift_enabled"] = True
+hazards[1]["z_min"] = hazards[1]["z_max"] = 7
+next_hazard_id = 3
+
+def hazard_cols(h):
+    return range(h["col_start"], h["col_start"] + h["width"])
+
+def hazard_rows(h):
+    return range(h["row_start"], h["row_start"] + h["height"])
+
+def in_hazard(cell, h):
+    col, row, z = cell
+    return col in hazard_cols(h) and row in hazard_rows(h) and h["z_min"] <= z <= h["z_max"]
+
+def in_any_hazard(cell):
+    return any(in_hazard(cell, h) for h in hazards)
+
+def update_hazard_drift(h):
+    if not h["drift_enabled"]:
+        return
+    h["tick_counter"] += 1
+    if h["tick_counter"] >= h["drift_interval"]:
+        h["tick_counter"] = 0
+        col_min = 2
+        col_max = max(GRID_COLS - h["width"] - 1, col_min)
+        h["col_start"] += h["drift_dir"]
+        if h["col_start"] >= col_max:
+            h["col_start"] = col_max
+            h["drift_dir"] = -1
+        elif h["col_start"] <= col_min:
+            h["col_start"] = col_min
+            h["drift_dir"] = 1
+
+def get_selected_hazard():
+    return next((h for h in hazards if h["id"] == selected_hazard_id), None)
 
 start_cell = (1, 1, 0)
 goal_cell = (18, 3, 0)
@@ -159,10 +197,9 @@ def get_neighbors(cell):
 
 def move_cost(a, b):
     base = VERTICAL_COST if a[2] != b[2] else 1
-    ash = ASH_COST_PER_STEP if in_ash(b) else 0
-    turb = TURBULENCE_COST_PER_STEP if in_turbulence(b) else 0
+    hazard_total = sum(h["cost"] for h in hazards if in_hazard(b, h))
     wind = wind_cost(a, b)
-    return base + ash + turb + wind
+    return base + hazard_total + wind
 
 def reconstruct_path(came_from, current):
     result = [current]
@@ -195,12 +232,11 @@ def a_star(start, goal):
 #         PATH STATE + DERIVED-DATA RECOMPUTATION
 # ============================================================
 
-path = a_star(start_cell, goal_cell)
-if path is None:
-    print("WARNING: No initial path found between start and goal!")
-    path = [start_cell]
-else:
-    print(f"Initial path found with {len(path)} waypoints.")
+path = []
+pixel_path = []
+cumulative_distances = []
+total_distance = 1
+profile_points = []
 
 def grid_to_pixel(cell):
     col, row, z = cell
@@ -214,19 +250,13 @@ def compute_cumulative_distances(p):
         distances.append(distances[-1] + move_cost(p[i - 1], p[i]))
     return distances
 
-pixel_path = []
-cumulative_distances = []
-total_distance = 1
-max_altitude = max(GRID_LAYERS - 1, 1)
-profile_points = []
-
 def recompute_derived_data():
     global pixel_path, cumulative_distances, total_distance, profile_points
     pixel_path = [grid_to_pixel(cell) for cell in path]
     cumulative_distances = compute_cumulative_distances(path)
     total_distance = cumulative_distances[-1] if cumulative_distances else 1
     profile_points = [
-        profile_to_pixel(cumulative_distances[i], path[i][2])
+        profile_to_pixel(cumulative_distances[i], alt_ft(path[i][2]))
         for i in range(len(path))
     ]
 
@@ -295,29 +325,29 @@ def estimated_energy(total_cost):
     return total_cost * ENERGY_PER_COST_UNIT
 
 # ============================================================
-#              ALTITUDE PROFILE DATA (side panel)
+#         ALTITUDE PROFILE DATA (side panel, RUNNING only)
 # ============================================================
 
-PANEL_MARGIN = 20
+PANEL_MARGIN = 20          # right-side breathing room for the graph
+TICK_LABEL_GUTTER = 84     # left-side space reserved for "40,000 ft"-style labels
+
 panel_rect = pygame.Rect(
-    GRID_WIDTH + PANEL_MARGIN,
+    GRID_WIDTH + TICK_LABEL_GUTTER,
     70,
-    PANEL_WIDTH - PANEL_MARGIN * 2,
+    PANEL_WIDTH - TICK_LABEL_GUTTER - PANEL_MARGIN,
     GRID_HEIGHT - 150,
 )
 
-def profile_to_pixel(distance, altitude):
+def profile_to_pixel(distance, altitude_ft):
     tx = 0 if total_distance == 0 else distance / total_distance
-    ty = altitude / max_altitude
+    ty = 0 if MAX_ALTITUDE_FT == 0 else altitude_ft / MAX_ALTITUDE_FT
     x = panel_rect.left + tx * panel_rect.width
     y = panel_rect.bottom - ty * panel_rect.height
     return (x, y)
 
-recompute_derived_data()
-
-def draw_hazard_band(z_min, z_max, color, label):
-    _, y_top = profile_to_pixel(0, z_max)
-    _, y_bottom = profile_to_pixel(0, z_min)
+def draw_hazard_band(alt_min_ft, alt_max_ft, color, label):
+    _, y_top = profile_to_pixel(0, alt_max_ft)
+    _, y_bottom = profile_to_pixel(0, alt_min_ft)
     band_height = max(y_bottom - y_top, 4)
     band_surface = pygame.Surface((panel_rect.width, int(band_height)), pygame.SRCALPHA)
     band_surface.fill(color)
@@ -330,18 +360,20 @@ def draw_altitude_panel():
     pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
 
     title = font_title.render("Altitude Profile", True, TEXT_MAIN)
-    screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 22))
+    screen.blit(title, (GRID_WIDTH + 16, 22))
 
-    draw_hazard_band(ASH_Z_MIN, ASH_Z_MAX, PANEL_ASH_BAND_COLOR, "ash band")
-    draw_hazard_band(TURB_Z_MIN, TURB_Z_MAX, PANEL_TURB_BAND_COLOR, "turbulence band")
+    for h in hazards:
+        draw_hazard_band(alt_ft(h["z_min"]), alt_ft(h["z_max"]), h["band_color"], f'{h["label"]} #{h["id"]}')
 
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.topleft, 2)
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.bottomright, 2)
 
     for z in range(GRID_LAYERS):
-        _, y = profile_to_pixel(0, z)
-        label = font_tiny.render(f"z={z}", True, (150, 150, 165))
-        screen.blit(label, (panel_rect.left - 30, y - 7))
+        ft = alt_ft(z)
+        _, y = profile_to_pixel(0, ft)
+        label_text = f"{ft:,} ft"
+        label = font_tiny.render(label_text, True, (150, 150, 165))
+        screen.blit(label, (panel_rect.left - label.get_width() - 6, y - 7))
         pygame.draw.line(screen, (38, 39, 50), (panel_rect.left, y), (panel_rect.right, y), 1)
 
     x_label = font_tiny.render("distance traveled  ->", True, (150, 150, 165))
@@ -360,12 +392,12 @@ def draw_altitude_marker(segment_index, progress, current_z):
         d_end = cumulative_distances[segment_index + 1]
         dist_now = d_start + (d_end - d_start) * progress
 
-    x, y = profile_to_pixel(dist_now, current_z)
+    x, y = profile_to_pixel(dist_now, alt_ft(current_z))
     pygame.draw.circle(screen, PANEL_MARKER_COLOR, (int(x), int(y)), 7)
     pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), 7, 1)
 
 # ============================================================
-#              DASHBOARD (bottom strip)
+#              DASHBOARD (bottom strip, RUNNING only)
 # ============================================================
 
 dashboard_rect = pygame.Rect(0, GRID_HEIGHT, WIDTH, DASHBOARD_HEIGHT)
@@ -414,12 +446,14 @@ def draw_dashboard(hazard_ahead):
     )
     screen.blit(caption, (16, HEIGHT - 18))
 
+    press_r = font_tiny.render("Press R to return to setup", True, (120, 120, 135))
+    screen.blit(press_r, (WIDTH - 190, HEIGHT - 18))
+
 # ============================================================
-#              LEGEND
+#              LEGEND (RUNNING only)
 # ============================================================
 
 def draw_legend():
-    """Small always-visible legend in the top-right corner of the grid area."""
     items = [
         (START_COLOR, "Start"),
         (GOAL_COLOR, "Goal"),
@@ -427,9 +461,9 @@ def draw_legend():
         (DRONE_CLIMB_COLOR, "Drone (climbing/descending)"),
         (OBSTACLE_FULL_COLOR, "Obstacle (all altitudes)"),
         (OBSTACLE_PARTIAL_COLOR, "Obstacle (some altitudes)"),
-        (ASH_COLOR[:3], "Volcanic ash (moving)"),
-        (TURBULENCE_COLOR[:3], "Turbulence"),
     ]
+    for h in hazards:
+        items.append((h["color"][:3], f'{h["label"]} #{h["id"]}'))
 
     padding = 10
     row_height = 20
@@ -450,11 +484,10 @@ def draw_legend():
         y += row_height
 
 # ============================================================
-#              MAIN VISUALIZATION
+#              SHARED DRAWING (both states)
 # ============================================================
 
 def ease_in_out(t):
-    """Smooth acceleration/deceleration instead of constant linear speed."""
     return 0.5 - 0.5 * math.cos(t * math.pi)
 
 def lerp(a, b, t):
@@ -477,19 +510,13 @@ def draw_obstacles():
         else:
             pygame.draw.rect(screen, OBSTACLE_PARTIAL_COLOR, rect)
 
-def draw_ash():
-    ash_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
-    ash_surface.fill(ASH_COLOR)
-    for col in get_ash_cols():
-        for row in ASH_ROWS:
-            screen.blit(ash_surface, (col * CELL_SIZE, row * CELL_SIZE))
-
-def draw_turbulence():
-    turb_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
-    turb_surface.fill(TURBULENCE_COLOR)
-    for col in TURBULENCE_COLS:
-        for row in TURBULENCE_ROWS:
-            screen.blit(turb_surface, (col * CELL_SIZE, row * CELL_SIZE))
+def draw_hazards():
+    for h in hazards:
+        surf = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
+        surf.fill(h["color"])
+        for col in hazard_cols(h):
+            for row in hazard_rows(h):
+                screen.blit(surf, (col * CELL_SIZE, row * CELL_SIZE))
 
 def draw_wind_indicator():
     ax, ay = 90, GRID_HEIGHT - 40
@@ -520,6 +547,249 @@ def draw_replan_stats(flash):
     surf = font_small.render(msg, True, color)
     screen.blit(surf, (12, 74))
 
+# ============================================================
+#              SETUP-SCREEN STATE + LOGIC
+# ============================================================
+
+sim_state = "SETUP"
+setup_mode = "idle"
+pending_hazard_type = None
+pending_corner1 = None
+selected_hazard_id = hazards[0]["id"]
+setup_message = ""
+active_buttons = []
+
+def handle_grid_click(pos):
+    global setup_mode, pending_corner1, pending_hazard_type
+    global start_cell, goal_cell, hazards, next_hazard_id, selected_hazard_id
+
+    col = pos[0] // CELL_SIZE
+    row = pos[1] // CELL_SIZE
+    if not (0 <= col < GRID_COLS and 0 <= row < GRID_ROWS):
+        return
+
+    if setup_mode == "placing_start":
+        start_cell = (col, row, start_cell[2])
+        setup_mode = "idle"
+    elif setup_mode == "placing_goal":
+        goal_cell = (col, row, goal_cell[2])
+        setup_mode = "idle"
+    elif setup_mode == "hazard_corner1":
+        pending_corner1 = (col, row)
+        setup_mode = "hazard_corner2"
+    elif setup_mode == "hazard_corner2":
+        c1, c2 = pending_corner1, (col, row)
+        col_start, col_end = min(c1[0], c2[0]), max(c1[0], c2[0])
+        row_start, row_end = min(c1[1], c2[1]), max(c1[1], c2[1])
+        new_h = make_hazard(
+            next_hazard_id, pending_hazard_type,
+            col_start=col_start, width=col_end - col_start + 1,
+            row_start=row_start, height=row_end - row_start + 1,
+        )
+        hazards.append(new_h)
+        selected_hazard_id = new_h["id"]
+        next_hazard_id += 1
+        setup_mode = "idle"
+        pending_hazard_type = None
+        pending_corner1 = None
+
+def handle_action(action, target=None):
+    global setup_mode, pending_hazard_type, selected_hazard_id, hazards
+    global start_cell, goal_cell, sim_state, path, setup_message
+    global replan_count, last_replan_ms, hazard_cells_ever_crossed, last_counted_segment
+    global current_segment, progress, hazard_was_detected, replan_flash_timer, mission_start_ticks
+
+    if action == "place_start":
+        setup_mode = "placing_start"
+    elif action == "place_goal":
+        setup_mode = "placing_goal"
+    elif action == "cycle_start_alt":
+        start_cell = (start_cell[0], start_cell[1], (start_cell[2] + 1) % GRID_LAYERS)
+    elif action == "cycle_goal_alt":
+        goal_cell = (goal_cell[0], goal_cell[1], (goal_cell[2] + 1) % GRID_LAYERS)
+    elif action == "add_ash":
+        pending_hazard_type = "ash"
+        setup_mode = "hazard_corner1"
+    elif action == "add_turbulence":
+        pending_hazard_type = "turbulence"
+        setup_mode = "hazard_corner1"
+    elif action == "select_hazard":
+        selected_hazard_id = target
+    elif action == "remove_hazard":
+        hazards = [h for h in hazards if h["id"] != target]
+        if selected_hazard_id == target:
+            selected_hazard_id = hazards[0]["id"] if hazards else None
+    elif action == "cycle_minz":
+        h = get_selected_hazard()
+        if h:
+            h["z_min"] = (h["z_min"] + 1) % GRID_LAYERS
+            if h["z_min"] > h["z_max"]:
+                h["z_max"] = h["z_min"]
+    elif action == "cycle_maxz":
+        h = get_selected_hazard()
+        if h:
+            h["z_max"] = (h["z_max"] + 1) % GRID_LAYERS
+            if h["z_max"] < h["z_min"]:
+                h["z_min"] = h["z_max"]
+    elif action == "toggle_drift":
+        h = get_selected_hazard()
+        if h:
+            h["drift_enabled"] = not h["drift_enabled"]
+    elif action == "toggle_dir":
+        h = get_selected_hazard()
+        if h:
+            h["drift_dir"] *= -1
+    elif action == "cycle_speed":
+        h = get_selected_hazard()
+        if h:
+            idx = SPEED_PRESETS.index(h["drift_interval"]) if h["drift_interval"] in SPEED_PRESETS else 1
+            h["drift_interval"] = SPEED_PRESETS[(idx + 1) % len(SPEED_PRESETS)]
+    elif action == "start_simulation":
+        if start_cell[:2] == goal_cell[:2] and start_cell[2] == goal_cell[2]:
+            setup_message = "Start and goal cannot be the same cell."
+            return
+        if start_cell in obstacles_3d or goal_cell in obstacles_3d:
+            setup_message = "Start or goal sits inside a solid obstacle -- move it."
+            return
+        result = a_star(start_cell, goal_cell)
+        if result is None:
+            setup_message = "No valid path found with current hazards/obstacles -- adjust and try again."
+            return
+        path = result
+        recompute_derived_data()
+        for h in hazards:
+            h["tick_counter"] = 0
+        replan_count = 0
+        last_replan_ms = 0.0
+        hazard_cells_ever_crossed = 0
+        last_counted_segment = -1
+        current_segment = 0
+        progress = 0.0
+        hazard_was_detected = False
+        replan_flash_timer = 0
+        mission_start_ticks = pygame.time.get_ticks()
+        setup_message = ""
+        sim_state = "RUNNING"
+
+def layout_setup_ui():
+    buttons = []
+    x = GRID_WIDTH + 16
+    y = 14
+
+    screen.blit(font_title.render("SETUP", True, TEXT_MAIN), (x, y))
+    y += 30
+    for line in ["Place Start/Goal, add hazard", "zones, then Start Simulation.",
+                 f"Altitude: 0 - {MAX_ALTITUDE_FT:,} ft ({GRID_LAYERS} levels)"]:
+        screen.blit(font_tiny.render(line, True, (150, 150, 165)), (x, y))
+        y += 14
+    y += 12
+
+    def add_button(label, action, w=280, h=30, target=None, highlight=False):
+        nonlocal y
+        rect = pygame.Rect(x, y, w, h)
+        color = BUTTON_ACTIVE_COLOR if highlight else BUTTON_COLOR
+        pygame.draw.rect(screen, color, rect, border_radius=4)
+        pygame.draw.rect(screen, PANEL_AXIS_COLOR, rect, 1, border_radius=4)
+        text = font_small.render(label, True, TEXT_MAIN)
+        screen.blit(text, (rect.x + 8, rect.y + (rect.height - text.get_height()) // 2))
+        buttons.append({"rect": rect, "action": action, "target": target})
+        return rect
+
+    add_button("Place Start", "place_start", highlight=(setup_mode == "placing_start"))
+    y += 36
+    coord = font_tiny.render(f"  ({start_cell[0]}, {start_cell[1]})", True, (170, 170, 185))
+    screen.blit(coord, (x, y - 34))
+
+    add_button("Place Goal", "place_goal", highlight=(setup_mode == "placing_goal"))
+    y += 36
+    coord = font_tiny.render(f"  ({goal_cell[0]}, {goal_cell[1]})", True, (170, 170, 185))
+    screen.blit(coord, (x, y - 34))
+
+    add_button(f"Start Alt: {alt_ft(start_cell[2]):,} ft", "cycle_start_alt")
+    y += 34
+    add_button(f"Goal Alt: {alt_ft(goal_cell[2]):,} ft", "cycle_goal_alt")
+    y += 40
+
+    add_button("+ Add Ash Zone", "add_ash", highlight=(pending_hazard_type == "ash"))
+    y += 36
+    add_button("+ Add Turbulence Zone", "add_turbulence", highlight=(pending_hazard_type == "turbulence"))
+    y += 34
+
+    mode_text = {
+        "placing_start": "Click a grid cell to set START.",
+        "placing_goal": "Click a grid cell to set GOAL.",
+        "hazard_corner1": "Click the FIRST corner of the zone.",
+        "hazard_corner2": "Click the SECOND corner of the zone.",
+    }.get(setup_mode, "")
+    if mode_text:
+        msg = font_tiny.render(mode_text, True, PANEL_MARKER_COLOR)
+        screen.blit(msg, (x, y))
+    y += 22
+
+    screen.blit(font_small.render("Hazards:", True, TEXT_MAIN), (x, y))
+    y += 24
+    for h in hazards:
+        row_rect = pygame.Rect(x, y, 246, 24)
+        color = BUTTON_ACTIVE_COLOR if h["id"] == selected_hazard_id else BUTTON_COLOR
+        pygame.draw.rect(screen, color, row_rect, border_radius=4)
+        text = font_tiny.render(f'#{h["id"]} {h["label"]}', True, TEXT_MAIN)
+        screen.blit(text, (row_rect.x + 6, row_rect.y + 4))
+        buttons.append({"rect": row_rect, "action": "select_hazard", "target": h["id"]})
+
+        remove_rect = pygame.Rect(x + 250, y, 28, 24)
+        pygame.draw.rect(screen, (100, 55, 55), remove_rect, border_radius=4)
+        xtext = font_tiny.render("X", True, TEXT_MAIN)
+        screen.blit(xtext, (remove_rect.x + 9, remove_rect.y + 4))
+        buttons.append({"rect": remove_rect, "action": "remove_hazard", "target": h["id"]})
+        y += 27
+
+    y += 8
+    selected = get_selected_hazard()
+    if selected:
+        screen.blit(font_tiny.render(f'Editing #{selected["id"]} ({selected["label"]}):', True, (170, 170, 185)), (x, y))
+        y += 20
+        add_button(f'Min Alt: {alt_ft(selected["z_min"]):,} ft', "cycle_minz")
+        y += 32
+        add_button(f'Max Alt: {alt_ft(selected["z_max"]):,} ft', "cycle_maxz")
+        y += 32
+        drift_label = "Drift: ON" if selected["drift_enabled"] else "Drift: OFF"
+        add_button(drift_label, "toggle_drift")
+        y += 32
+        dir_label = "Direction: ->" if selected["drift_dir"] == 1 else "Direction: <-"
+        add_button(dir_label, "toggle_dir")
+        y += 32
+        add_button(f'Speed: {selected["drift_interval"]}', "cycle_speed")
+        y += 32
+
+    return buttons
+
+def draw_setup_bottom_bar():
+    pygame.draw.rect(screen, DASHBOARD_BG_COLOR, dashboard_rect)
+    pygame.draw.line(screen, PANEL_AXIS_COLOR, (0, GRID_HEIGHT), (WIDTH, GRID_HEIGHT), 2)
+
+    rect = pygame.Rect(20, GRID_HEIGHT + 20, 240, 44)
+    pygame.draw.rect(screen, BUTTON_START_COLOR, rect, border_radius=6)
+    text = font.render("Start Simulation", True, (255, 255, 255))
+    screen.blit(text, (rect.x + 20, rect.y + 11))
+
+    if setup_message:
+        msg = font_small.render(setup_message, True, WARNING_COLOR)
+        screen.blit(msg, (280, GRID_HEIGHT + 33))
+
+    return {"rect": rect, "action": "start_simulation", "target": None}
+
+def draw_hazard_corner_preview():
+    if setup_mode == "hazard_corner2" and pending_corner1 is not None:
+        mx, my = pygame.mouse.get_pos()
+        if mx < GRID_WIDTH and my < GRID_HEIGHT:
+            col2, row2 = mx // CELL_SIZE, my // CELL_SIZE
+            c1 = pending_corner1
+            x1 = min(c1[0], col2) * CELL_SIZE
+            y1 = min(c1[1], row2) * CELL_SIZE
+            x2 = (max(c1[0], col2) + 1) * CELL_SIZE
+            y2 = (max(c1[1], row2) + 1) * CELL_SIZE
+            pygame.draw.rect(screen, (255, 255, 255), pygame.Rect(x1, y1, x2 - x1, y2 - y1), 2)
+
 # --- Drone movement state ---
 current_segment = 0
 progress = 0.0
@@ -530,85 +800,104 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and sim_state == "SETUP":
+            pos = event.pos
+            clicked = next((b for b in active_buttons if b["rect"].collidepoint(pos)), None)
+            if clicked:
+                handle_action(clicked["action"], clicked.get("target"))
+            elif pos[0] < GRID_WIDTH and pos[1] < GRID_HEIGHT:
+                handle_grid_click(pos)
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_r and sim_state == "RUNNING":
+                sim_state = "SETUP"
 
-    tick_counter += 1
-    if tick_counter >= ASH_TICK_INTERVAL:
-        tick_counter = 0
-        update_ash_drift()
+    if sim_state == "RUNNING":
+        for h in hazards:
+            update_hazard_drift(h)
 
-    if current_segment < len(path) - 1:
-        progress += speed
-        if progress >= 1.0:
-            progress = 0.0
-            if current_segment != last_counted_segment:
-                if in_any_hazard(path[current_segment]):
-                    hazard_cells_ever_crossed += 1
-                last_counted_segment = current_segment
-            current_segment += 1
+        if current_segment < len(path) - 1:
+            progress += speed
+            if progress >= 1.0:
+                progress = 0.0
+                current_segment += 1
+                if current_segment != last_counted_segment:
+                    if in_any_hazard(path[current_segment]):
+                        hazard_cells_ever_crossed += 1
+                    last_counted_segment = current_segment
 
-    is_climbing = False
-    if current_segment < len(path) - 1:
-        start_point = pixel_path[current_segment]
-        end_point = pixel_path[current_segment + 1]
-        eased_progress = ease_in_out(progress)  # smoother motion, same underlying timing
-        drone_x = lerp(start_point[0], end_point[0], eased_progress)
-        drone_y = lerp(start_point[1], end_point[1], eased_progress)
-        current_z = path[current_segment][2]
-        is_climbing = path[current_segment][2] != path[current_segment + 1][2]
-    else:
-        drone_x, drone_y = pixel_path[-1]
-        current_z = path[-1][2]
+        is_climbing = False
+        if current_segment < len(path) - 1:
+            start_point = pixel_path[current_segment]
+            end_point = pixel_path[current_segment + 1]
+            eased_progress = ease_in_out(progress)
+            drone_x = lerp(start_point[0], end_point[0], eased_progress)
+            drone_y = lerp(start_point[1], end_point[1], eased_progress)
+            current_z = path[current_segment][2]
+            is_climbing = path[current_segment][2] != path[current_segment + 1][2]
+        else:
+            drone_x, drone_y = pixel_path[-1]
+            current_z = path[-1][2]
 
-    hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
-
-    if hazard_ahead and not hazard_was_detected:
-        print(f"[EVENT] Hazard newly detected ahead! {len(hazard_cells)} cell(s): {hazard_cells}")
-        trigger_replan(current_segment)
-        replan_flash_timer = 30
         hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
-    elif not hazard_ahead and hazard_was_detected:
-        print("[EVENT] Hazard ahead has cleared.")
-    hazard_was_detected = hazard_ahead
 
-    if replan_flash_timer > 0:
-        replan_flash_timer -= 1
+        if hazard_ahead and not hazard_was_detected:
+            print(f"[EVENT] Hazard newly detected ahead! {len(hazard_cells)} cell(s): {hazard_cells}")
+            trigger_replan(current_segment)
+            replan_flash_timer = 30
+            hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
+            if not hazard_ahead:
+                print("[EVENT] Hazard resolved immediately by replan.")
+        elif not hazard_ahead and hazard_was_detected:
+            print("[EVENT] Hazard ahead has cleared.")
+        hazard_was_detected = hazard_ahead
 
-    # --- Drawing: main grid area ---
+        if replan_flash_timer > 0:
+            replan_flash_timer -= 1
+
+    # --- Drawing ---
     screen.fill(BG_COLOR)
     draw_grid()
-    draw_ash()
-    draw_turbulence()
+    draw_hazards()
     draw_obstacles()
-    draw_path(hazard_ahead)
+    if sim_state == "RUNNING":
+        draw_path(hazard_ahead)
     draw_wind_indicator()
 
-    pygame.draw.circle(screen, START_COLOR, pixel_path[0], 10)
-    pygame.draw.circle(screen, GOAL_COLOR, pixel_path[-1], 10)
+    pygame.draw.circle(screen, START_COLOR, grid_to_pixel(start_cell), 10)
+    pygame.draw.circle(screen, GOAL_COLOR, grid_to_pixel(goal_cell), 10)
 
-    drone_color = DRONE_CLIMB_COLOR if is_climbing else DRONE_COLOR
-    # Subtle glow ring behind the drone for a slightly more polished look
-    glow_surface = pygame.Surface((28, 28), pygame.SRCALPHA)
-    pygame.draw.circle(glow_surface, (*drone_color, 60), (14, 14), 14)
-    screen.blit(glow_surface, (int(drone_x) - 14, int(drone_y) - 14))
-    pygame.draw.circle(screen, drone_color, (int(drone_x), int(drone_y)), 8)
+    if sim_state == "RUNNING":
+        drone_color = DRONE_CLIMB_COLOR if is_climbing else DRONE_COLOR
+        glow_surface = pygame.Surface((28, 28), pygame.SRCALPHA)
+        pygame.draw.circle(glow_surface, (*drone_color, 60), (14, 14), 14)
+        screen.blit(glow_surface, (int(drone_x) - 14, int(drone_y) - 14))
+        pygame.draw.circle(screen, drone_color, (int(drone_x), int(drone_y)), 8)
 
-    title_label = font_title.render("Adaptive Flight-Path Replanner", True, TEXT_MAIN)
-    screen.blit(title_label, (12, 10))
+        title_label = font_title.render("Adaptive Flight-Path Replanner", True, TEXT_MAIN)
+        screen.blit(title_label, (12, 10))
 
-    alt_label = font_small.render(
-        f"Altitude z={current_z}" + ("  (climbing/descending)" if is_climbing else ""),
-        True, (190, 190, 205)
-    )
-    screen.blit(alt_label, (12, GRID_HEIGHT - 26))
+        alt_label = font_small.render(
+            f"Altitude: {alt_ft(current_z):,} ft" + ("  (climbing/descending)" if is_climbing else ""),
+            True, (190, 190, 205)
+        )
+        screen.blit(alt_label, (12, GRID_HEIGHT - 26))
 
-    draw_hazard_status(hazard_ahead, hazard_cells)
-    draw_replan_stats(replan_flash_timer > 0)
-    draw_legend()
+        draw_hazard_status(hazard_ahead, hazard_cells)
+        draw_replan_stats(replan_flash_timer > 0)
+        draw_legend()
 
-    draw_altitude_panel()
-    draw_altitude_marker(current_segment, progress, current_z)
+        draw_altitude_panel()
+        draw_altitude_marker(current_segment, progress, current_z)
 
-    draw_dashboard(hazard_ahead)
+        draw_dashboard(hazard_ahead)
+    else:
+        pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT))
+        pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+        draw_hazard_corner_preview()
+        buttons = layout_setup_ui()
+        bottom_button = draw_setup_bottom_bar()
+        buttons.append(bottom_button)
+        active_buttons = buttons
 
     pygame.display.flip()
     clock.tick(60)
