@@ -15,7 +15,7 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 7")
+pygame.display.set_caption("Drone Replanner - Stage 8")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 font_small = pygame.font.SysFont(None, 20)
@@ -30,16 +30,19 @@ DRONE_CLIMB_COLOR = (255, 210, 90)
 PATH_COLOR = (120, 120, 160)
 OBSTACLE_FULL_COLOR = (100, 60, 60)
 OBSTACLE_PARTIAL_COLOR = (150, 110, 60)
-ASH_COLOR = (200, 160, 60, 110)  # translucent (has alpha)
+ASH_COLOR = (200, 160, 60, 110)
+TURBULENCE_COLOR = (150, 90, 200, 110)
 PANEL_BG_COLOR = (22, 22, 30)
 PANEL_LINE_COLOR = (100, 180, 255)
 PANEL_AXIS_COLOR = (90, 90, 105)
 PANEL_MARKER_COLOR = (255, 210, 90)
 PANEL_ASH_BAND_COLOR = (200, 160, 60, 70)
+PANEL_TURB_BAND_COLOR = (150, 90, 200, 70)
+WIND_ARROW_COLOR = (180, 220, 255)
 
 VERTICAL_COST = 2
 
-# --- Hard obstacles (fully impassable, same as Stage 5) ---
+# --- Hard obstacles ---
 obstacles_3d = set()
 
 full_obstacles_2d = [
@@ -56,26 +59,52 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
-# --- NEW: Volcanic ash zone (soft cost, not a hard obstacle) ---
-# Occupies a rectangular column/row range, but ONLY at low altitude (z = 0).
-ASH_COLS = range(6, 10)     # columns 6,7,8,9
-ASH_ROWS = range(8, 14)     # rows 8 through 13
-ASH_Z_MIN, ASH_Z_MAX = 0, 0  # only dangerous at z = 0; z = 1 and z = 2 are clear
-ASH_COST_PER_STEP = 12       # extra cost added when entering an ash cell in-band
+# --- Ash (soft cost, low altitude) ---
+ASH_COLS = range(6, 10)
+ASH_ROWS = range(8, 14)
+ASH_Z_MIN, ASH_Z_MAX = 0, 0
+ASH_COST_PER_STEP = 12
 
 def in_ash(cell):
     col, row, z = cell
     return col in ASH_COLS and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
 
+# --- NEW: Turbulence (soft cost, HIGH altitude — same layer the drone climbs to) ---
+TURBULENCE_COLS = range(13, 19)
+TURBULENCE_ROWS = range(2, 6)
+TURB_Z_MIN, TURB_Z_MAX = 2, 2   # only dangerous at the top layer
+TURBULENCE_COST_PER_STEP = 10
+
+def in_turbulence(cell):
+    col, row, z = cell
+    return col in TURBULENCE_COLS and row in TURBULENCE_ROWS and TURB_Z_MIN <= z <= TURB_Z_MAX
+
+# --- NEW: Wind (directional cost, whole map) ---
+# Wind blows toward +x (eastward). Flying AGAINST it (moving -x) costs extra.
+WIND_DIRECTION = (1, 0)
+WIND_PENALTY = 3
+
+def wind_cost(a, b):
+    """Extra cost if this horizontal move goes directly against the wind. Never a discount."""
+    if a[2] != b[2]:
+        return 0  # wind only affects horizontal moves in this simplified model
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    dot = dx * WIND_DIRECTION[0] + dy * WIND_DIRECTION[1]
+    if dot < 0:
+        return WIND_PENALTY
+    return 0
+
 start_cell = (1, 1, 0)
 goal_cell = (18, 13, 0)
 
 # ============================================================
-#                    A* PATHFINDING (3D + cost map)
+#                    A* PATHFINDING (full cost map)
 # ============================================================
 
 def heuristic(a, b):
-    # Still assumes the cheapest possible case (no ash) -> remains a valid lower bound.
+    # Assumes cheapest case (no ash/turbulence/headwind) -> still a valid lower bound,
+    # since move_cost only ever ADDS penalties on top of this baseline.
     dx = abs(a[0] - b[0])
     dy = abs(a[1] - b[1])
     dz = abs(a[2] - b[2])
@@ -91,16 +120,17 @@ def get_neighbors(cell):
     valid = []
     for c in candidates:
         cx, cy, cz = c
-        # Note: ash cells are NOT removed here -> they remain enterable, just costly.
         if 0 <= cx < GRID_COLS and 0 <= cy < GRID_ROWS and 0 <= cz < GRID_LAYERS and c not in obstacles_3d:
             valid.append(c)
     return valid
 
 def move_cost(a, b):
-    """Cost of moving from cell a into adjacent cell b: base movement cost + hazard cost of entering b."""
+    """Total cost = base distance/altitude cost + ash + turbulence + wind."""
     base = VERTICAL_COST if a[2] != b[2] else 1
-    hazard = ASH_COST_PER_STEP if in_ash(b) else 0
-    return base + hazard
+    ash = ASH_COST_PER_STEP if in_ash(b) else 0
+    turb = TURBULENCE_COST_PER_STEP if in_turbulence(b) else 0
+    wind = wind_cost(a, b)
+    return base + ash + turb + wind
 
 def reconstruct_path(came_from, current):
     path = [current]
@@ -136,10 +166,16 @@ if path is None:
     path = [start_cell]
 else:
     total_cost = sum(move_cost(path[i], path[i + 1]) for i in range(len(path) - 1))
-    ash_cells_crossed = sum(1 for cell in path if in_ash(cell))
+    ash_crossed = sum(1 for cell in path if in_ash(cell))
+    turb_crossed = sum(1 for cell in path if in_turbulence(cell))
+    headwind_moves = sum(
+        1 for i in range(len(path) - 1) if wind_cost(path[i], path[i + 1]) > 0
+    )
     print(f"Path found with {len(path)} waypoints.")
     print(f"Total path cost: {total_cost}")
-    print(f"Ash-zone cells crossed: {ash_cells_crossed}  (0 means the drone climbed above it)")
+    print(f"Ash-zone cells crossed: {ash_crossed}")
+    print(f"Turbulence-zone cells crossed: {turb_crossed}")
+    print(f"Headwind moves taken: {headwind_moves}")
 
 # ============================================================
 #              ALTITUDE PROFILE DATA (side panel)
@@ -175,21 +211,24 @@ profile_points = [
     for i in range(len(path))
 ]
 
+def draw_hazard_band(z_min, z_max, color, label):
+    _, y_top = profile_to_pixel(0, z_max)
+    _, y_bottom = profile_to_pixel(0, z_min)
+    band_height = max(y_bottom - y_top, 4)
+    band_surface = pygame.Surface((panel_rect.width, int(band_height)), pygame.SRCALPHA)
+    band_surface.fill(color)
+    screen.blit(band_surface, (panel_rect.left, int(y_top)))
+    label_surface = font_small.render(label, True, (230, 230, 230))
+    screen.blit(label_surface, (panel_rect.left + 4, int(y_top) + 2))
+
 def draw_altitude_panel():
     pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, HEIGHT))
 
     title = font.render("Altitude Profile", True, (220, 220, 220))
     screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 25))
 
-    # Shaded band showing WHERE the ash danger zone sits, altitude-wise
-    _, y_top = profile_to_pixel(0, ASH_Z_MAX)
-    _, y_bottom = profile_to_pixel(0, ASH_Z_MIN)
-    band_height = max(y_bottom - y_top, 4)
-    band_surface = pygame.Surface((panel_rect.width, int(band_height)), pygame.SRCALPHA)
-    band_surface.fill(PANEL_ASH_BAND_COLOR)
-    screen.blit(band_surface, (panel_rect.left, int(y_top)))
-    band_label = font_small.render("ash band", True, (200, 170, 100))
-    screen.blit(band_label, (panel_rect.left + 4, int(y_top) + 2))
+    draw_hazard_band(ASH_Z_MIN, ASH_Z_MAX, PANEL_ASH_BAND_COLOR, "ash band")
+    draw_hazard_band(TURB_Z_MIN, TURB_Z_MAX, PANEL_TURB_BAND_COLOR, "turbulence band")
 
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.topleft, 2)
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.bottomright, 2)
@@ -253,12 +292,28 @@ def draw_obstacles():
             pygame.draw.rect(screen, OBSTACLE_PARTIAL_COLOR, rect)
 
 def draw_ash():
-    """Draw a translucent overlay over ash-zone cells (top-down; remember it's only dangerous at z=0)."""
     ash_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
     ash_surface.fill(ASH_COLOR)
     for col in ASH_COLS:
         for row in ASH_ROWS:
             screen.blit(ash_surface, (col * CELL_SIZE, row * CELL_SIZE))
+
+def draw_turbulence():
+    turb_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
+    turb_surface.fill(TURBULENCE_COLOR)
+    for col in TURBULENCE_COLS:
+        for row in TURBULENCE_ROWS:
+            screen.blit(turb_surface, (col * CELL_SIZE, row * CELL_SIZE))
+
+def draw_wind_indicator():
+    """Static arrow in the corner showing wind direction, plus a label."""
+    ax, ay = 90, GRID_HEIGHT - 40
+    dx, dy = WIND_DIRECTION
+    tip = (ax + dx * 40, ay + dy * 40)
+    pygame.draw.line(screen, WIND_ARROW_COLOR, (ax, ay), tip, 3)
+    pygame.draw.circle(screen, WIND_ARROW_COLOR, tip, 5)
+    label = font_small.render("WIND", True, WIND_ARROW_COLOR)
+    screen.blit(label, (ax - 15, ay + 12))
 
 def draw_path():
     if len(pixel_path) > 1:
@@ -297,8 +352,10 @@ while running:
     screen.fill(BG_COLOR)
     draw_grid()
     draw_ash()
+    draw_turbulence()
     draw_obstacles()
     draw_path()
+    draw_wind_indicator()
 
     pygame.draw.circle(screen, START_COLOR, pixel_path[0], 10)
     pygame.draw.circle(screen, GOAL_COLOR, pixel_path[-1], 10)
