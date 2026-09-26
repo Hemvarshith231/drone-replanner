@@ -3,7 +3,7 @@ import heapq
 
 pygame.init()
 
-# --- Window layout: main grid area + side panel ---
+# --- Window layout ---
 GRID_WIDTH, GRID_HEIGHT = 800, 600
 PANEL_WIDTH = 260
 WIDTH = GRID_WIDTH + PANEL_WIDTH
@@ -15,7 +15,7 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 6")
+pygame.display.set_caption("Drone Replanner - Stage 7")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 font_small = pygame.font.SysFont(None, 20)
@@ -30,14 +30,16 @@ DRONE_CLIMB_COLOR = (255, 210, 90)
 PATH_COLOR = (120, 120, 160)
 OBSTACLE_FULL_COLOR = (100, 60, 60)
 OBSTACLE_PARTIAL_COLOR = (150, 110, 60)
+ASH_COLOR = (200, 160, 60, 110)  # translucent (has alpha)
 PANEL_BG_COLOR = (22, 22, 30)
 PANEL_LINE_COLOR = (100, 180, 255)
 PANEL_AXIS_COLOR = (90, 90, 105)
 PANEL_MARKER_COLOR = (255, 210, 90)
+PANEL_ASH_BAND_COLOR = (200, 160, 60, 70)
 
 VERTICAL_COST = 2
 
-# --- 3D obstacles ---
+# --- Hard obstacles (fully impassable, same as Stage 5) ---
 obstacles_3d = set()
 
 full_obstacles_2d = [
@@ -54,14 +56,26 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
+# --- NEW: Volcanic ash zone (soft cost, not a hard obstacle) ---
+# Occupies a rectangular column/row range, but ONLY at low altitude (z = 0).
+ASH_COLS = range(6, 10)     # columns 6,7,8,9
+ASH_ROWS = range(8, 14)     # rows 8 through 13
+ASH_Z_MIN, ASH_Z_MAX = 0, 0  # only dangerous at z = 0; z = 1 and z = 2 are clear
+ASH_COST_PER_STEP = 12       # extra cost added when entering an ash cell in-band
+
+def in_ash(cell):
+    col, row, z = cell
+    return col in ASH_COLS and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
+
 start_cell = (1, 1, 0)
 goal_cell = (18, 13, 0)
 
 # ============================================================
-#                    A* PATHFINDING (3D)
+#                    A* PATHFINDING (3D + cost map)
 # ============================================================
 
 def heuristic(a, b):
+    # Still assumes the cheapest possible case (no ash) -> remains a valid lower bound.
     dx = abs(a[0] - b[0])
     dy = abs(a[1] - b[1])
     dz = abs(a[2] - b[2])
@@ -77,14 +91,16 @@ def get_neighbors(cell):
     valid = []
     for c in candidates:
         cx, cy, cz = c
+        # Note: ash cells are NOT removed here -> they remain enterable, just costly.
         if 0 <= cx < GRID_COLS and 0 <= cy < GRID_ROWS and 0 <= cz < GRID_LAYERS and c not in obstacles_3d:
             valid.append(c)
     return valid
 
 def move_cost(a, b):
-    if a[2] != b[2]:
-        return VERTICAL_COST
-    return 1
+    """Cost of moving from cell a into adjacent cell b: base movement cost + hazard cost of entering b."""
+    base = VERTICAL_COST if a[2] != b[2] else 1
+    hazard = ASH_COST_PER_STEP if in_ash(b) else 0
+    return base + hazard
 
 def reconstruct_path(came_from, current):
     path = [current]
@@ -119,25 +135,26 @@ if path is None:
     print("WARNING: No path found between start and goal!")
     path = [start_cell]
 else:
+    total_cost = sum(move_cost(path[i], path[i + 1]) for i in range(len(path) - 1))
+    ash_cells_crossed = sum(1 for cell in path if in_ash(cell))
     print(f"Path found with {len(path)} waypoints.")
+    print(f"Total path cost: {total_cost}")
+    print(f"Ash-zone cells crossed: {ash_cells_crossed}  (0 means the drone climbed above it)")
 
 # ============================================================
-#              ALTITUDE PROFILE DATA (for the side panel)
+#              ALTITUDE PROFILE DATA (side panel)
 # ============================================================
 
 def compute_cumulative_distances(path):
-    """For each waypoint, compute total distance traveled to reach it (cost-based, matches move_cost)."""
     distances = [0]
     for i in range(1, len(path)):
-        step_cost = move_cost(path[i - 1], path[i])
-        distances.append(distances[-1] + step_cost)
+        distances.append(distances[-1] + move_cost(path[i - 1], path[i]))
     return distances
 
 cumulative_distances = compute_cumulative_distances(path)
 total_distance = cumulative_distances[-1] if cumulative_distances else 1
-max_altitude = max(GRID_LAYERS - 1, 1)  # avoid divide-by-zero if GRID_LAYERS were 1
+max_altitude = max(GRID_LAYERS - 1, 1)
 
-# --- Panel drawing rectangle (inside the reserved strip on the right) ---
 PANEL_MARGIN = 20
 panel_rect = pygame.Rect(
     GRID_WIDTH + PANEL_MARGIN,
@@ -147,15 +164,9 @@ panel_rect = pygame.Rect(
 )
 
 def profile_to_pixel(distance, altitude):
-    """Map (distance traveled, altitude) to a pixel position INSIDE panel_rect."""
-    if total_distance == 0:
-        tx = 0
-    else:
-        tx = distance / total_distance
+    tx = 0 if total_distance == 0 else distance / total_distance
     ty = altitude / max_altitude
-
     x = panel_rect.left + tx * panel_rect.width
-    # Higher altitude should appear HIGHER on screen -> invert y
     y = panel_rect.bottom - ty * panel_rect.height
     return (x, y)
 
@@ -170,29 +181,34 @@ def draw_altitude_panel():
     title = font.render("Altitude Profile", True, (220, 220, 220))
     screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 25))
 
-    # Axes
+    # Shaded band showing WHERE the ash danger zone sits, altitude-wise
+    _, y_top = profile_to_pixel(0, ASH_Z_MAX)
+    _, y_bottom = profile_to_pixel(0, ASH_Z_MIN)
+    band_height = max(y_bottom - y_top, 4)
+    band_surface = pygame.Surface((panel_rect.width, int(band_height)), pygame.SRCALPHA)
+    band_surface.fill(PANEL_ASH_BAND_COLOR)
+    screen.blit(band_surface, (panel_rect.left, int(y_top)))
+    band_label = font_small.render("ash band", True, (200, 170, 100))
+    screen.blit(band_label, (panel_rect.left + 4, int(y_top) + 2))
+
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.topleft, 2)
     pygame.draw.line(screen, PANEL_AXIS_COLOR, panel_rect.bottomleft, panel_rect.bottomright, 2)
 
-    # Altitude tick labels (z = 0, 1, 2, ...)
     for z in range(GRID_LAYERS):
         _, y = profile_to_pixel(0, z)
         label = font_small.render(f"z={z}", True, (150, 150, 165))
         screen.blit(label, (panel_rect.left - 32, y - 8))
         pygame.draw.line(screen, (45, 45, 55), (panel_rect.left, y), (panel_rect.right, y), 1)
 
-    # Axis captions
     x_label = font_small.render("distance traveled ->", True, (150, 150, 165))
     screen.blit(x_label, (panel_rect.left, panel_rect.bottom + 8))
 
-    # The altitude line itself
     if len(profile_points) > 1:
         pygame.draw.lines(screen, PANEL_LINE_COLOR, False, profile_points, 3)
     for point in profile_points:
         pygame.draw.circle(screen, PANEL_LINE_COLOR, (int(point[0]), int(point[1])), 3)
 
 def draw_altitude_marker(segment_index, progress, current_z):
-    """Draw a moving marker on the graph showing the drone's current position along the profile."""
     if segment_index >= len(cumulative_distances) - 1:
         dist_now = cumulative_distances[-1]
     else:
@@ -236,6 +252,14 @@ def draw_obstacles():
         else:
             pygame.draw.rect(screen, OBSTACLE_PARTIAL_COLOR, rect)
 
+def draw_ash():
+    """Draw a translucent overlay over ash-zone cells (top-down; remember it's only dangerous at z=0)."""
+    ash_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
+    ash_surface.fill(ASH_COLOR)
+    for col in ASH_COLS:
+        for row in ASH_ROWS:
+            screen.blit(ash_surface, (col * CELL_SIZE, row * CELL_SIZE))
+
 def draw_path():
     if len(pixel_path) > 1:
         pygame.draw.lines(screen, PATH_COLOR, False, pixel_path, 3)
@@ -272,6 +296,7 @@ while running:
     # --- Drawing: main grid area ---
     screen.fill(BG_COLOR)
     draw_grid()
+    draw_ash()
     draw_obstacles()
     draw_path()
 
