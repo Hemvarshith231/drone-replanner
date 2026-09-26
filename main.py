@@ -1,13 +1,15 @@
 import pygame
 import heapq
+import time
 
 pygame.init()
 
 # --- Window layout ---
 GRID_WIDTH, GRID_HEIGHT = 800, 600
 PANEL_WIDTH = 260
+DASHBOARD_HEIGHT = 90
 WIDTH = GRID_WIDTH + PANEL_WIDTH
-HEIGHT = GRID_HEIGHT
+HEIGHT = GRID_HEIGHT + DASHBOARD_HEIGHT
 
 CELL_SIZE = 40
 GRID_COLS = GRID_WIDTH // CELL_SIZE
@@ -15,10 +17,11 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 10")
+pygame.display.set_caption("Drone Replanner - Stage 12")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 font_small = pygame.font.SysFont(None, 20)
+font_tiny = pygame.font.SysFont(None, 16)
 
 # --- Colors ---
 BG_COLOR = (30, 30, 40)
@@ -42,8 +45,13 @@ PANEL_TURB_BAND_COLOR = (150, 90, 200, 70)
 WIND_ARROW_COLOR = (180, 220, 255)
 WARNING_COLOR = (255, 90, 90)
 SAFE_COLOR = (100, 220, 140)
+REPLAN_FLASH_COLOR = (255, 210, 90)
+DASHBOARD_BG_COLOR = (18, 18, 24)
+DASHBOARD_LABEL_COLOR = (150, 150, 165)
+DASHBOARD_VALUE_COLOR = (225, 225, 235)
 
 VERTICAL_COST = 2
+ENERGY_PER_COST_UNIT = 0.5  # arbitrary illustrative constant -- see dashboard caption
 
 # --- Hard obstacles ---
 obstacles_3d = set()
@@ -62,9 +70,9 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
-# --- Ash: drifts over time ---
+# --- Ash: drifts over time (retuned for a cleaner demo) ---
 ASH_WIDTH = 4
-ASH_ROWS = range(8, 14)
+ASH_ROWS = range(9, 12)
 ASH_Z_MIN, ASH_Z_MAX = 0, 0
 ASH_COST_PER_STEP = 12
 
@@ -119,7 +127,7 @@ def wind_cost(a, b):
     return WIND_PENALTY if dot < 0 else 0
 
 start_cell = (1, 1, 0)
-goal_cell = (18, 13, 0)
+goal_cell = (18, 3, 0)  # retuned: further from ash's drift range near the old goal
 
 # ============================================================
 #                    A* PATHFINDING
@@ -153,12 +161,12 @@ def move_cost(a, b):
     return base + ash + turb + wind
 
 def reconstruct_path(came_from, current):
-    path = [current]
+    result = [current]
     while current in came_from:
         current = came_from[current]
-        path.append(current)
-    path.reverse()
-    return path
+        result.append(current)
+    result.reverse()
+    return result
 
 def a_star(start, goal):
     open_set = []
@@ -179,55 +187,121 @@ def a_star(start, goal):
                 came_from[neighbor] = current
     return None
 
-path = a_star(start_cell, goal_cell)
+# ============================================================
+#         PATH STATE + DERIVED-DATA RECOMPUTATION
+# ============================================================
 
+path = a_star(start_cell, goal_cell)
 if path is None:
-    print("WARNING: No path found between start and goal!")
+    print("WARNING: No initial path found between start and goal!")
     path = [start_cell]
 else:
-    print(f"Path found with {len(path)} waypoints (computed at t=0).")
+    print(f"Initial path found with {len(path)} waypoints.")
+
+def grid_to_pixel(cell):
+    col, row, z = cell
+    x = col * CELL_SIZE + CELL_SIZE // 2
+    y = row * CELL_SIZE + CELL_SIZE // 2
+    return (x, y)
+
+def compute_cumulative_distances(p):
+    distances = [0]
+    for i in range(1, len(p)):
+        distances.append(distances[-1] + move_cost(p[i - 1], p[i]))
+    return distances
+
+pixel_path = []
+cumulative_distances = []
+total_distance = 1
+max_altitude = max(GRID_LAYERS - 1, 1)
+profile_points = []
+
+def recompute_derived_data():
+    global pixel_path, cumulative_distances, total_distance, profile_points
+    pixel_path = [grid_to_pixel(cell) for cell in path]
+    cumulative_distances = compute_cumulative_distances(path)
+    total_distance = cumulative_distances[-1] if cumulative_distances else 1
+    profile_points = [
+        profile_to_pixel(cumulative_distances[i], path[i][2])
+        for i in range(len(path))
+    ]
+
+# --- Replanning metrics ---
+replan_count = 0
+last_replan_ms = 0.0
+
+def trigger_replan(current_segment):
+    global path, replan_count, last_replan_ms
+
+    if current_segment + 1 >= len(path):
+        return
+
+    replan_from = path[current_segment + 1]
+
+    start_time = time.perf_counter()
+    new_remaining = a_star(replan_from, goal_cell)
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+    if new_remaining is None:
+        print("[REPLAN FAILED] No alternate route found -- keeping existing plan.")
+        return
+
+    path = path[:current_segment + 1] + new_remaining
+    replan_count += 1
+    last_replan_ms = elapsed_ms
+    recompute_derived_data()
+    print(f"[REPLAN #{replan_count}] New route has {len(path)} waypoints. Computed in {elapsed_ms:.3f} ms.")
 
 # ============================================================
-#              NEW: HAZARD-AHEAD DETECTION
+#              HAZARD-AHEAD DETECTION
 # ============================================================
 
 def get_remaining_path(full_path, current_segment):
-    """Everything from the drone's CURRENT position onward -- ignores cells already flown past."""
     return full_path[current_segment:]
 
 def detect_hazard_ahead(full_path, current_segment):
-    """
-    Returns (hazard_found, list_of_hazard_cells) for the REMAINING route only.
-    This is the detection step Stage 11 will hook a replan trigger onto.
-    """
     remaining = get_remaining_path(full_path, current_segment)
     hazard_cells = [cell for cell in remaining if in_any_hazard(cell)]
     return (len(hazard_cells) > 0), hazard_cells
 
-# Edge-detection state: remembers the PREVIOUS frame's hazard status,
-# so we can detect the moment it CHANGES (false->true or true->false).
 hazard_was_detected = False
+replan_flash_timer = 0
+
+# ============================================================
+#         NEW: MISSION-WIDE METRICS (Stage 12)
+# ============================================================
+
+mission_start_ticks = pygame.time.get_ticks()
+hazard_cells_ever_crossed = 0       # cumulative -- incremented once per waypoint ARRIVAL, not per frame
+last_counted_segment = -1          # prevents double-counting the same waypoint across frames
+
+def mission_elapsed_seconds():
+    return (pygame.time.get_ticks() - mission_start_ticks) / 1000.0
+
+def current_path_total_cost():
+    return cumulative_distances[-1] if cumulative_distances else 0
+
+def current_path_altitude_changes():
+    """How many times the CURRENT plan changes altitude, start to finish."""
+    changes = 0
+    for i in range(1, len(path)):
+        if path[i][2] != path[i - 1][2]:
+            changes += 1
+    return changes
+
+def estimated_energy(total_cost):
+    return total_cost * ENERGY_PER_COST_UNIT
 
 # ============================================================
 #              ALTITUDE PROFILE DATA (side panel)
 # ============================================================
-
-def compute_cumulative_distances(path):
-    distances = [0]
-    for i in range(1, len(path)):
-        distances.append(distances[-1] + move_cost(path[i - 1], path[i]))
-    return distances
-
-cumulative_distances = compute_cumulative_distances(path)
-total_distance = cumulative_distances[-1] if cumulative_distances else 1
-max_altitude = max(GRID_LAYERS - 1, 1)
 
 PANEL_MARGIN = 20
 panel_rect = pygame.Rect(
     GRID_WIDTH + PANEL_MARGIN,
     60,
     PANEL_WIDTH - PANEL_MARGIN * 2,
-    HEIGHT - 140,
+    GRID_HEIGHT - 140,
 )
 
 def profile_to_pixel(distance, altitude):
@@ -237,10 +311,7 @@ def profile_to_pixel(distance, altitude):
     y = panel_rect.bottom - ty * panel_rect.height
     return (x, y)
 
-profile_points = [
-    profile_to_pixel(cumulative_distances[i], path[i][2])
-    for i in range(len(path))
-]
+recompute_derived_data()
 
 def draw_hazard_band(z_min, z_max, color, label):
     _, y_top = profile_to_pixel(0, z_max)
@@ -253,7 +324,7 @@ def draw_hazard_band(z_min, z_max, color, label):
     screen.blit(label_surface, (panel_rect.left + 4, int(y_top) + 2))
 
 def draw_altitude_panel():
-    pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, HEIGHT))
+    pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT))
     title = font.render("Altitude Profile", True, (220, 220, 220))
     screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 25))
 
@@ -290,16 +361,57 @@ def draw_altitude_marker(segment_index, progress, current_z):
     pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), 6, 1)
 
 # ============================================================
-#                      MAIN VISUALIZATION
+#              NEW: DASHBOARD (bottom strip)
 # ============================================================
 
-def grid_to_pixel(cell):
-    col, row, z = cell
-    x = col * CELL_SIZE + CELL_SIZE // 2
-    y = row * CELL_SIZE + CELL_SIZE // 2
-    return (x, y)
+dashboard_rect = pygame.Rect(0, GRID_HEIGHT, WIDTH, DASHBOARD_HEIGHT)
 
-pixel_path = [grid_to_pixel(cell) for cell in path]
+def draw_dashboard(hazard_ahead):
+    pygame.draw.rect(screen, DASHBOARD_BG_COLOR, dashboard_rect)
+    pygame.draw.line(screen, PANEL_AXIS_COLOR, (0, GRID_HEIGHT), (WIDTH, GRID_HEIGHT), 2)
+
+    total_cost = current_path_total_cost()
+    alt_changes = current_path_altitude_changes()
+    energy = estimated_energy(total_cost)
+    elapsed = mission_elapsed_seconds()
+
+    col1 = [
+        ("Mission time", f"{elapsed:.1f} s"),
+        ("Current path length (cost)", f"{total_cost}"),
+        ("Altitude changes (this plan)", f"{alt_changes}"),
+    ]
+    col2 = [
+        ("Hazard cells crossed (mission)", f"{hazard_cells_ever_crossed}"),
+        ("Replans triggered", f"{replan_count}"),
+        ("Last replan compute time", f"{last_replan_ms:.3f} ms"),
+    ]
+    col3 = [
+        ("Est. energy used (illustrative)", f"{energy:.1f} units"),
+        ("Remaining route status", "HAZARD AHEAD" if hazard_ahead else "Clear"),
+    ]
+
+    def draw_column(items, x):
+        y = GRID_HEIGHT + 8
+        for label, value in items:
+            label_surf = font_tiny.render(label, True, DASHBOARD_LABEL_COLOR)
+            value_surf = font_small.render(value, True, DASHBOARD_VALUE_COLOR)
+            screen.blit(label_surf, (x, y))
+            screen.blit(value_surf, (x, y + 14))
+            y += 32
+
+    draw_column(col1, 14)
+    draw_column(col2, 280)
+    draw_column(col3, 560)
+
+    caption = font_tiny.render(
+        "Energy is illustrative: proportional to path cost, not a calibrated power model.",
+        True, (110, 110, 120)
+    )
+    screen.blit(caption, (14, HEIGHT - 16))
+
+# ============================================================
+#                      MAIN VISUALIZATION
+# ============================================================
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -345,19 +457,24 @@ def draw_wind_indicator():
     screen.blit(label, (ax - 15, ay + 12))
 
 def draw_path(hazard_ahead):
-    """Path drawn in red if a hazard lies ahead on the remaining route, grey otherwise."""
     color = HAZARD_PATH_COLOR if hazard_ahead else PATH_COLOR
     if len(pixel_path) > 1:
         pygame.draw.lines(screen, color, False, pixel_path, 3)
 
 def draw_hazard_status(hazard_ahead, hazard_cells):
     if hazard_ahead:
-        msg = f"HAZARD AHEAD DETECTED -- {len(hazard_cells)} cell(s) on remaining route"
+        msg = f"HAZARD AHEAD -- {len(hazard_cells)} cell(s) on remaining route"
         surf = font.render(msg, True, WARNING_COLOR)
     else:
         msg = "Remaining route: clear"
         surf = font.render(msg, True, SAFE_COLOR)
     screen.blit(surf, (10, 40))
+
+def draw_replan_stats(flash):
+    color = REPLAN_FLASH_COLOR if flash else (200, 200, 210)
+    msg = f"Replans: {replan_count}   Last replan time: {last_replan_ms:.3f} ms"
+    surf = font_small.render(msg, True, color)
+    screen.blit(surf, (10, 68))
 
 # --- Drone movement state ---
 current_segment = 0
@@ -376,11 +493,16 @@ while running:
         tick_counter = 0
         update_ash_drift()
 
-    # --- Advance drone along its (still-static-for-now) path ---
+    # --- Advance drone along its CURRENT path ---
     if current_segment < len(path) - 1:
         progress += speed
         if progress >= 1.0:
             progress = 0.0
+            # Count hazard exposure exactly once, at the moment of arriving at a new waypoint
+            if current_segment != last_counted_segment:
+                if in_any_hazard(path[current_segment]):
+                    hazard_cells_ever_crossed += 1
+                last_counted_segment = current_segment
             current_segment += 1
 
     is_climbing = False
@@ -395,15 +517,20 @@ while running:
         drone_x, drone_y = pixel_path[-1]
         current_z = path[-1][2]
 
-    # --- NEW: check the REMAINING route for hazards, every frame ---
+    # --- Hazard detection on the REMAINING route ---
     hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
 
-    # --- Edge detection: only print/log on the moment it CHANGES ---
     if hazard_ahead and not hazard_was_detected:
         print(f"[EVENT] Hazard newly detected ahead! {len(hazard_cells)} cell(s): {hazard_cells}")
+        trigger_replan(current_segment)
+        replan_flash_timer = 30
+        hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
     elif not hazard_ahead and hazard_was_detected:
         print("[EVENT] Hazard ahead has cleared.")
     hazard_was_detected = hazard_ahead
+
+    if replan_flash_timer > 0:
+        replan_flash_timer -= 1
 
     # --- Drawing: main grid area ---
     screen.fill(BG_COLOR)
@@ -425,10 +552,14 @@ while running:
     screen.blit(text_surface, (10, 10))
 
     draw_hazard_status(hazard_ahead, hazard_cells)
+    draw_replan_stats(replan_flash_timer > 0)
 
     # --- Drawing: side panel ---
     draw_altitude_panel()
     draw_altitude_marker(current_segment, progress, current_z)
+
+    # --- Drawing: dashboard ---
+    draw_dashboard(hazard_ahead)
 
     pygame.display.flip()
     clock.tick(60)
