@@ -15,7 +15,7 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 8")
+pygame.display.set_caption("Drone Replanner - Stage 9")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 font_small = pygame.font.SysFont(None, 20)
@@ -39,6 +39,7 @@ PANEL_MARKER_COLOR = (255, 210, 90)
 PANEL_ASH_BAND_COLOR = (200, 160, 60, 70)
 PANEL_TURB_BAND_COLOR = (150, 90, 200, 70)
 WIND_ARROW_COLOR = (180, 220, 255)
+WARNING_COLOR = (255, 90, 90)
 
 VERTICAL_COST = 2
 
@@ -59,52 +60,68 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
-# --- Ash (soft cost, low altitude) ---
-ASH_COLS = range(6, 10)
+# --- Ash: NOW MOVES OVER TIME ---
+ASH_WIDTH = 4   # number of columns wide
 ASH_ROWS = range(8, 14)
 ASH_Z_MIN, ASH_Z_MAX = 0, 0
 ASH_COST_PER_STEP = 12
 
+ash_start_col = 6         # current left edge of the ash rectangle (this DRIFTS)
+ash_drift_direction = 1   # +1 = drifting right, -1 = drifting left
+ASH_DRIFT_MIN_COL = 2
+ASH_DRIFT_MAX_COL = GRID_COLS - ASH_WIDTH - 1
+
+ASH_TICK_INTERVAL = 45  # ash shifts by 1 column every this many frames
+tick_counter = 0
+
+def get_ash_cols():
+    return range(ash_start_col, ash_start_col + ASH_WIDTH)
+
 def in_ash(cell):
     col, row, z = cell
-    return col in ASH_COLS and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
+    return col in get_ash_cols() and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
 
-# --- NEW: Turbulence (soft cost, HIGH altitude — same layer the drone climbs to) ---
+def update_ash_drift():
+    """Called once per tick interval: shifts the ash region by 1 column, bouncing at bounds."""
+    global ash_start_col, ash_drift_direction
+    ash_start_col += ash_drift_direction
+    if ash_start_col >= ASH_DRIFT_MAX_COL:
+        ash_start_col = ASH_DRIFT_MAX_COL
+        ash_drift_direction = -1
+    elif ash_start_col <= ASH_DRIFT_MIN_COL:
+        ash_start_col = ASH_DRIFT_MIN_COL
+        ash_drift_direction = 1
+
+# --- Turbulence (unchanged, still static for now) ---
 TURBULENCE_COLS = range(13, 19)
 TURBULENCE_ROWS = range(2, 6)
-TURB_Z_MIN, TURB_Z_MAX = 2, 2   # only dangerous at the top layer
+TURB_Z_MIN, TURB_Z_MAX = 2, 2
 TURBULENCE_COST_PER_STEP = 10
 
 def in_turbulence(cell):
     col, row, z = cell
     return col in TURBULENCE_COLS and row in TURBULENCE_ROWS and TURB_Z_MIN <= z <= TURB_Z_MAX
 
-# --- NEW: Wind (directional cost, whole map) ---
-# Wind blows toward +x (eastward). Flying AGAINST it (moving -x) costs extra.
+# --- Wind ---
 WIND_DIRECTION = (1, 0)
 WIND_PENALTY = 3
 
 def wind_cost(a, b):
-    """Extra cost if this horizontal move goes directly against the wind. Never a discount."""
     if a[2] != b[2]:
-        return 0  # wind only affects horizontal moves in this simplified model
+        return 0
     dx = b[0] - a[0]
     dy = b[1] - a[1]
     dot = dx * WIND_DIRECTION[0] + dy * WIND_DIRECTION[1]
-    if dot < 0:
-        return WIND_PENALTY
-    return 0
+    return WIND_PENALTY if dot < 0 else 0
 
 start_cell = (1, 1, 0)
 goal_cell = (18, 13, 0)
 
 # ============================================================
-#                    A* PATHFINDING (full cost map)
+#                    A* PATHFINDING
 # ============================================================
 
 def heuristic(a, b):
-    # Assumes cheapest case (no ash/turbulence/headwind) -> still a valid lower bound,
-    # since move_cost only ever ADDS penalties on top of this baseline.
     dx = abs(a[0] - b[0])
     dy = abs(a[1] - b[1])
     dz = abs(a[2] - b[2])
@@ -125,7 +142,6 @@ def get_neighbors(cell):
     return valid
 
 def move_cost(a, b):
-    """Total cost = base distance/altitude cost + ash + turbulence + wind."""
     base = VERTICAL_COST if a[2] != b[2] else 1
     ash = ASH_COST_PER_STEP if in_ash(b) else 0
     turb = TURBULENCE_COST_PER_STEP if in_turbulence(b) else 0
@@ -159,23 +175,14 @@ def a_star(start, goal):
                 came_from[neighbor] = current
     return None
 
+# --- Compute the path ONCE at startup (ash will drift after this, path stays stale on purpose) ---
 path = a_star(start_cell, goal_cell)
 
 if path is None:
     print("WARNING: No path found between start and goal!")
     path = [start_cell]
 else:
-    total_cost = sum(move_cost(path[i], path[i + 1]) for i in range(len(path) - 1))
-    ash_crossed = sum(1 for cell in path if in_ash(cell))
-    turb_crossed = sum(1 for cell in path if in_turbulence(cell))
-    headwind_moves = sum(
-        1 for i in range(len(path) - 1) if wind_cost(path[i], path[i + 1]) > 0
-    )
-    print(f"Path found with {len(path)} waypoints.")
-    print(f"Total path cost: {total_cost}")
-    print(f"Ash-zone cells crossed: {ash_crossed}")
-    print(f"Turbulence-zone cells crossed: {turb_crossed}")
-    print(f"Headwind moves taken: {headwind_moves}")
+    print(f"Path found with {len(path)} waypoints (computed at t=0, will NOT update as ash drifts).")
 
 # ============================================================
 #              ALTITUDE PROFILE DATA (side panel)
@@ -294,7 +301,7 @@ def draw_obstacles():
 def draw_ash():
     ash_surface = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
     ash_surface.fill(ASH_COLOR)
-    for col in ASH_COLS:
+    for col in get_ash_cols():
         for row in ASH_ROWS:
             screen.blit(ash_surface, (col * CELL_SIZE, row * CELL_SIZE))
 
@@ -306,7 +313,6 @@ def draw_turbulence():
             screen.blit(turb_surface, (col * CELL_SIZE, row * CELL_SIZE))
 
 def draw_wind_indicator():
-    """Static arrow in the corner showing wind direction, plus a label."""
     ax, ay = 90, GRID_HEIGHT - 40
     dx, dy = WIND_DIRECTION
     tip = (ax + dx * 40, ay + dy * 40)
@@ -319,6 +325,10 @@ def draw_path():
     if len(pixel_path) > 1:
         pygame.draw.lines(screen, PATH_COLOR, False, pixel_path, 3)
 
+def path_crosses_ash_now():
+    """Check if ANY waypoint in the (stale) planned path currently sits inside the drifted ash."""
+    return any(in_ash(cell) for cell in path)
+
 # --- Drone movement state ---
 current_segment = 0
 progress = 0.0
@@ -329,6 +339,12 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+
+    # --- Advance the ash drift on a timer ---
+    tick_counter += 1
+    if tick_counter >= ASH_TICK_INTERVAL:
+        tick_counter = 0
+        update_ash_drift()
 
     if current_segment < len(path) - 1:
         progress += speed
@@ -366,6 +382,11 @@ while running:
     label = f"Altitude (z): {current_z}" + ("  [CLIMBING/DESCENDING]" if is_climbing else "")
     text_surface = font.render(label, True, (220, 220, 220))
     screen.blit(text_surface, (10, 10))
+
+    # --- Show a warning if the (stale) path now crosses drifted ash ---
+    if path_crosses_ash_now():
+        warning_surface = font.render("!! PLANNED PATH NOW CROSSES ASH (stale plan) !!", True, WARNING_COLOR)
+        screen.blit(warning_surface, (10, 40))
 
     # --- Drawing: side panel ---
     draw_altitude_panel()
