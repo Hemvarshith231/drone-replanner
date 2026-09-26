@@ -15,7 +15,7 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 9")
+pygame.display.set_caption("Drone Replanner - Stage 10")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 font_small = pygame.font.SysFont(None, 20)
@@ -28,6 +28,7 @@ GOAL_COLOR = (220, 90, 90)
 DRONE_COLOR = (90, 160, 230)
 DRONE_CLIMB_COLOR = (255, 210, 90)
 PATH_COLOR = (120, 120, 160)
+HAZARD_PATH_COLOR = (255, 100, 100)
 OBSTACLE_FULL_COLOR = (100, 60, 60)
 OBSTACLE_PARTIAL_COLOR = (150, 110, 60)
 ASH_COLOR = (200, 160, 60, 110)
@@ -40,6 +41,7 @@ PANEL_ASH_BAND_COLOR = (200, 160, 60, 70)
 PANEL_TURB_BAND_COLOR = (150, 90, 200, 70)
 WIND_ARROW_COLOR = (180, 220, 255)
 WARNING_COLOR = (255, 90, 90)
+SAFE_COLOR = (100, 220, 140)
 
 VERTICAL_COST = 2
 
@@ -60,18 +62,18 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
-# --- Ash: NOW MOVES OVER TIME ---
-ASH_WIDTH = 4   # number of columns wide
+# --- Ash: drifts over time ---
+ASH_WIDTH = 4
 ASH_ROWS = range(8, 14)
 ASH_Z_MIN, ASH_Z_MAX = 0, 0
 ASH_COST_PER_STEP = 12
 
-ash_start_col = 6         # current left edge of the ash rectangle (this DRIFTS)
-ash_drift_direction = 1   # +1 = drifting right, -1 = drifting left
+ash_start_col = 6
+ash_drift_direction = 1
 ASH_DRIFT_MIN_COL = 2
 ASH_DRIFT_MAX_COL = GRID_COLS - ASH_WIDTH - 1
 
-ASH_TICK_INTERVAL = 45  # ash shifts by 1 column every this many frames
+ASH_TICK_INTERVAL = 45
 tick_counter = 0
 
 def get_ash_cols():
@@ -82,7 +84,6 @@ def in_ash(cell):
     return col in get_ash_cols() and row in ASH_ROWS and ASH_Z_MIN <= z <= ASH_Z_MAX
 
 def update_ash_drift():
-    """Called once per tick interval: shifts the ash region by 1 column, bouncing at bounds."""
     global ash_start_col, ash_drift_direction
     ash_start_col += ash_drift_direction
     if ash_start_col >= ASH_DRIFT_MAX_COL:
@@ -92,7 +93,7 @@ def update_ash_drift():
         ash_start_col = ASH_DRIFT_MIN_COL
         ash_drift_direction = 1
 
-# --- Turbulence (unchanged, still static for now) ---
+# --- Turbulence (static) ---
 TURBULENCE_COLS = range(13, 19)
 TURBULENCE_ROWS = range(2, 6)
 TURB_Z_MIN, TURB_Z_MAX = 2, 2
@@ -101,6 +102,9 @@ TURBULENCE_COST_PER_STEP = 10
 def in_turbulence(cell):
     col, row, z = cell
     return col in TURBULENCE_COLS and row in TURBULENCE_ROWS and TURB_Z_MIN <= z <= TURB_Z_MAX
+
+def in_any_hazard(cell):
+    return in_ash(cell) or in_turbulence(cell)
 
 # --- Wind ---
 WIND_DIRECTION = (1, 0)
@@ -175,14 +179,34 @@ def a_star(start, goal):
                 came_from[neighbor] = current
     return None
 
-# --- Compute the path ONCE at startup (ash will drift after this, path stays stale on purpose) ---
 path = a_star(start_cell, goal_cell)
 
 if path is None:
     print("WARNING: No path found between start and goal!")
     path = [start_cell]
 else:
-    print(f"Path found with {len(path)} waypoints (computed at t=0, will NOT update as ash drifts).")
+    print(f"Path found with {len(path)} waypoints (computed at t=0).")
+
+# ============================================================
+#              NEW: HAZARD-AHEAD DETECTION
+# ============================================================
+
+def get_remaining_path(full_path, current_segment):
+    """Everything from the drone's CURRENT position onward -- ignores cells already flown past."""
+    return full_path[current_segment:]
+
+def detect_hazard_ahead(full_path, current_segment):
+    """
+    Returns (hazard_found, list_of_hazard_cells) for the REMAINING route only.
+    This is the detection step Stage 11 will hook a replan trigger onto.
+    """
+    remaining = get_remaining_path(full_path, current_segment)
+    hazard_cells = [cell for cell in remaining if in_any_hazard(cell)]
+    return (len(hazard_cells) > 0), hazard_cells
+
+# Edge-detection state: remembers the PREVIOUS frame's hazard status,
+# so we can detect the moment it CHANGES (false->true or true->false).
+hazard_was_detected = False
 
 # ============================================================
 #              ALTITUDE PROFILE DATA (side panel)
@@ -230,7 +254,6 @@ def draw_hazard_band(z_min, z_max, color, label):
 
 def draw_altitude_panel():
     pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, HEIGHT))
-
     title = font.render("Altitude Profile", True, (220, 220, 220))
     screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 25))
 
@@ -321,13 +344,20 @@ def draw_wind_indicator():
     label = font_small.render("WIND", True, WIND_ARROW_COLOR)
     screen.blit(label, (ax - 15, ay + 12))
 
-def draw_path():
+def draw_path(hazard_ahead):
+    """Path drawn in red if a hazard lies ahead on the remaining route, grey otherwise."""
+    color = HAZARD_PATH_COLOR if hazard_ahead else PATH_COLOR
     if len(pixel_path) > 1:
-        pygame.draw.lines(screen, PATH_COLOR, False, pixel_path, 3)
+        pygame.draw.lines(screen, color, False, pixel_path, 3)
 
-def path_crosses_ash_now():
-    """Check if ANY waypoint in the (stale) planned path currently sits inside the drifted ash."""
-    return any(in_ash(cell) for cell in path)
+def draw_hazard_status(hazard_ahead, hazard_cells):
+    if hazard_ahead:
+        msg = f"HAZARD AHEAD DETECTED -- {len(hazard_cells)} cell(s) on remaining route"
+        surf = font.render(msg, True, WARNING_COLOR)
+    else:
+        msg = "Remaining route: clear"
+        surf = font.render(msg, True, SAFE_COLOR)
+    screen.blit(surf, (10, 40))
 
 # --- Drone movement state ---
 current_segment = 0
@@ -340,12 +370,13 @@ while running:
         if event.type == pygame.QUIT:
             running = False
 
-    # --- Advance the ash drift on a timer ---
+    # --- Advance ash drift ---
     tick_counter += 1
     if tick_counter >= ASH_TICK_INTERVAL:
         tick_counter = 0
         update_ash_drift()
 
+    # --- Advance drone along its (still-static-for-now) path ---
     if current_segment < len(path) - 1:
         progress += speed
         if progress >= 1.0:
@@ -364,13 +395,23 @@ while running:
         drone_x, drone_y = pixel_path[-1]
         current_z = path[-1][2]
 
+    # --- NEW: check the REMAINING route for hazards, every frame ---
+    hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
+
+    # --- Edge detection: only print/log on the moment it CHANGES ---
+    if hazard_ahead and not hazard_was_detected:
+        print(f"[EVENT] Hazard newly detected ahead! {len(hazard_cells)} cell(s): {hazard_cells}")
+    elif not hazard_ahead and hazard_was_detected:
+        print("[EVENT] Hazard ahead has cleared.")
+    hazard_was_detected = hazard_ahead
+
     # --- Drawing: main grid area ---
     screen.fill(BG_COLOR)
     draw_grid()
     draw_ash()
     draw_turbulence()
     draw_obstacles()
-    draw_path()
+    draw_path(hazard_ahead)
     draw_wind_indicator()
 
     pygame.draw.circle(screen, START_COLOR, pixel_path[0], 10)
@@ -383,10 +424,7 @@ while running:
     text_surface = font.render(label, True, (220, 220, 220))
     screen.blit(text_surface, (10, 10))
 
-    # --- Show a warning if the (stale) path now crosses drifted ash ---
-    if path_crosses_ash_now():
-        warning_surface = font.render("!! PLANNED PATH NOW CROSSES ASH (stale plan) !!", True, WARNING_COLOR)
-        screen.blit(warning_surface, (10, 40))
+    draw_hazard_status(hazard_ahead, hazard_cells)
 
     # --- Drawing: side panel ---
     draw_altitude_panel()
