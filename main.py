@@ -1,6 +1,7 @@
 import pygame
 import heapq
 import time
+import math
 
 pygame.init()
 
@@ -17,41 +18,44 @@ GRID_ROWS = GRID_HEIGHT // CELL_SIZE
 GRID_LAYERS = 3
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 12")
+pygame.display.set_caption("Adaptive Drone Flight-Path Replanner")
 clock = pygame.time.Clock()
-font = pygame.font.SysFont(None, 24)
-font_small = pygame.font.SysFont(None, 20)
-font_tiny = pygame.font.SysFont(None, 16)
+font_title = pygame.font.SysFont("Segoe UI", 22, bold=True)
+font = pygame.font.SysFont("Segoe UI", 20)
+font_small = pygame.font.SysFont("Segoe UI", 16)
+font_tiny = pygame.font.SysFont("Segoe UI", 13)
 
-# --- Colors ---
-BG_COLOR = (30, 30, 40)
-GRID_COLOR = (60, 60, 75)
-START_COLOR = (80, 200, 120)
-GOAL_COLOR = (220, 90, 90)
-DRONE_COLOR = (90, 160, 230)
-DRONE_CLIMB_COLOR = (255, 210, 90)
-PATH_COLOR = (120, 120, 160)
-HAZARD_PATH_COLOR = (255, 100, 100)
-OBSTACLE_FULL_COLOR = (100, 60, 60)
-OBSTACLE_PARTIAL_COLOR = (150, 110, 60)
-ASH_COLOR = (200, 160, 60, 110)
-TURBULENCE_COLOR = (150, 90, 200, 110)
-PANEL_BG_COLOR = (22, 22, 30)
-PANEL_LINE_COLOR = (100, 180, 255)
-PANEL_AXIS_COLOR = (90, 90, 105)
-PANEL_MARKER_COLOR = (255, 210, 90)
-PANEL_ASH_BAND_COLOR = (200, 160, 60, 70)
-PANEL_TURB_BAND_COLOR = (150, 90, 200, 70)
-WIND_ARROW_COLOR = (180, 220, 255)
-WARNING_COLOR = (255, 90, 90)
-SAFE_COLOR = (100, 220, 140)
-REPLAN_FLASH_COLOR = (255, 210, 90)
-DASHBOARD_BG_COLOR = (18, 18, 24)
-DASHBOARD_LABEL_COLOR = (150, 150, 165)
-DASHBOARD_VALUE_COLOR = (225, 225, 235)
+# --- Unified color palette ---
+BG_COLOR = (24, 25, 33)
+GRID_COLOR = (42, 43, 56)
+START_COLOR = (86, 211, 145)
+GOAL_COLOR = (232, 93, 93)
+DRONE_COLOR = (94, 170, 240)
+DRONE_CLIMB_COLOR = (247, 191, 85)
+PATH_COLOR = (110, 112, 145)
+HAZARD_PATH_COLOR = (232, 93, 93)
+OBSTACLE_FULL_COLOR = (95, 55, 55)
+OBSTACLE_PARTIAL_COLOR = (150, 105, 55)
+ASH_COLOR = (214, 168, 60, 115)
+TURBULENCE_COLOR = (150, 90, 210, 115)
+PANEL_BG_COLOR = (18, 19, 26)
+PANEL_LINE_COLOR = (94, 170, 240)
+PANEL_AXIS_COLOR = (70, 72, 92)
+PANEL_MARKER_COLOR = (247, 191, 85)
+PANEL_ASH_BAND_COLOR = (214, 168, 60, 65)
+PANEL_TURB_BAND_COLOR = (150, 90, 210, 65)
+WIND_ARROW_COLOR = (170, 210, 250)
+WARNING_COLOR = (240, 110, 110)
+SAFE_COLOR = (120, 220, 150)
+REPLAN_FLASH_COLOR = (247, 191, 85)
+DASHBOARD_BG_COLOR = (15, 16, 22)
+DASHBOARD_LABEL_COLOR = (140, 142, 160)
+DASHBOARD_VALUE_COLOR = (232, 232, 240)
+TEXT_MAIN = (225, 226, 235)
+LEGEND_BG_COLOR = (18, 19, 26)
 
 VERTICAL_COST = 2
-ENERGY_PER_COST_UNIT = 0.5  # arbitrary illustrative constant -- see dashboard caption
+ENERGY_PER_COST_UNIT = 0.5
 
 # --- Hard obstacles ---
 obstacles_3d = set()
@@ -70,7 +74,7 @@ for row in range(GRID_ROWS):
     obstacles_3d.add((WALL_COL, row, 0))
     obstacles_3d.add((WALL_COL, row, 1))
 
-# --- Ash: drifts over time (retuned for a cleaner demo) ---
+# --- Ash ---
 ASH_WIDTH = 4
 ASH_ROWS = range(9, 12)
 ASH_Z_MIN, ASH_Z_MAX = 0, 0
@@ -101,7 +105,7 @@ def update_ash_drift():
         ash_start_col = ASH_DRIFT_MIN_COL
         ash_drift_direction = 1
 
-# --- Turbulence (static) ---
+# --- Turbulence ---
 TURBULENCE_COLS = range(13, 19)
 TURBULENCE_ROWS = range(2, 6)
 TURB_Z_MIN, TURB_Z_MAX = 2, 2
@@ -127,7 +131,7 @@ def wind_cost(a, b):
     return WIND_PENALTY if dot < 0 else 0
 
 start_cell = (1, 1, 0)
-goal_cell = (18, 3, 0)  # retuned: further from ash's drift range near the old goal
+goal_cell = (18, 3, 0)
 
 # ============================================================
 #                    A* PATHFINDING
@@ -226,7 +230,6 @@ def recompute_derived_data():
         for i in range(len(path))
     ]
 
-# --- Replanning metrics ---
 replan_count = 0
 last_replan_ms = 0.0
 
@@ -268,12 +271,12 @@ hazard_was_detected = False
 replan_flash_timer = 0
 
 # ============================================================
-#         NEW: MISSION-WIDE METRICS (Stage 12)
+#              MISSION-WIDE METRICS
 # ============================================================
 
 mission_start_ticks = pygame.time.get_ticks()
-hazard_cells_ever_crossed = 0       # cumulative -- incremented once per waypoint ARRIVAL, not per frame
-last_counted_segment = -1          # prevents double-counting the same waypoint across frames
+hazard_cells_ever_crossed = 0
+last_counted_segment = -1
 
 def mission_elapsed_seconds():
     return (pygame.time.get_ticks() - mission_start_ticks) / 1000.0
@@ -282,7 +285,6 @@ def current_path_total_cost():
     return cumulative_distances[-1] if cumulative_distances else 0
 
 def current_path_altitude_changes():
-    """How many times the CURRENT plan changes altitude, start to finish."""
     changes = 0
     for i in range(1, len(path)):
         if path[i][2] != path[i - 1][2]:
@@ -299,9 +301,9 @@ def estimated_energy(total_cost):
 PANEL_MARGIN = 20
 panel_rect = pygame.Rect(
     GRID_WIDTH + PANEL_MARGIN,
-    60,
+    70,
     PANEL_WIDTH - PANEL_MARGIN * 2,
-    GRID_HEIGHT - 140,
+    GRID_HEIGHT - 150,
 )
 
 def profile_to_pixel(distance, altitude):
@@ -320,13 +322,15 @@ def draw_hazard_band(z_min, z_max, color, label):
     band_surface = pygame.Surface((panel_rect.width, int(band_height)), pygame.SRCALPHA)
     band_surface.fill(color)
     screen.blit(band_surface, (panel_rect.left, int(y_top)))
-    label_surface = font_small.render(label, True, (230, 230, 230))
+    label_surface = font_tiny.render(label, True, (235, 235, 240))
     screen.blit(label_surface, (panel_rect.left + 4, int(y_top) + 2))
 
 def draw_altitude_panel():
     pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT))
-    title = font.render("Altitude Profile", True, (220, 220, 220))
-    screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 25))
+    pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+
+    title = font_title.render("Altitude Profile", True, TEXT_MAIN)
+    screen.blit(title, (GRID_WIDTH + PANEL_MARGIN, 22))
 
     draw_hazard_band(ASH_Z_MIN, ASH_Z_MAX, PANEL_ASH_BAND_COLOR, "ash band")
     draw_hazard_band(TURB_Z_MIN, TURB_Z_MAX, PANEL_TURB_BAND_COLOR, "turbulence band")
@@ -336,11 +340,11 @@ def draw_altitude_panel():
 
     for z in range(GRID_LAYERS):
         _, y = profile_to_pixel(0, z)
-        label = font_small.render(f"z={z}", True, (150, 150, 165))
-        screen.blit(label, (panel_rect.left - 32, y - 8))
-        pygame.draw.line(screen, (45, 45, 55), (panel_rect.left, y), (panel_rect.right, y), 1)
+        label = font_tiny.render(f"z={z}", True, (150, 150, 165))
+        screen.blit(label, (panel_rect.left - 30, y - 7))
+        pygame.draw.line(screen, (38, 39, 50), (panel_rect.left, y), (panel_rect.right, y), 1)
 
-    x_label = font_small.render("distance traveled ->", True, (150, 150, 165))
+    x_label = font_tiny.render("distance traveled  ->", True, (150, 150, 165))
     screen.blit(x_label, (panel_rect.left, panel_rect.bottom + 8))
 
     if len(profile_points) > 1:
@@ -357,11 +361,11 @@ def draw_altitude_marker(segment_index, progress, current_z):
         dist_now = d_start + (d_end - d_start) * progress
 
     x, y = profile_to_pixel(dist_now, current_z)
-    pygame.draw.circle(screen, PANEL_MARKER_COLOR, (int(x), int(y)), 6)
-    pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), 6, 1)
+    pygame.draw.circle(screen, PANEL_MARKER_COLOR, (int(x), int(y)), 7)
+    pygame.draw.circle(screen, (255, 255, 255), (int(x), int(y)), 7, 1)
 
 # ============================================================
-#              NEW: DASHBOARD (bottom strip)
+#              DASHBOARD (bottom strip)
 # ============================================================
 
 dashboard_rect = pygame.Rect(0, GRID_HEIGHT, WIDTH, DASHBOARD_HEIGHT)
@@ -376,42 +380,82 @@ def draw_dashboard(hazard_ahead):
     elapsed = mission_elapsed_seconds()
 
     col1 = [
-        ("Mission time", f"{elapsed:.1f} s"),
-        ("Current path length (cost)", f"{total_cost}"),
-        ("Altitude changes (this plan)", f"{alt_changes}"),
+        ("MISSION TIME", f"{elapsed:.1f} s"),
+        ("CURRENT PATH COST", f"{total_cost}"),
+        ("ALTITUDE CHANGES", f"{alt_changes}"),
     ]
     col2 = [
-        ("Hazard cells crossed (mission)", f"{hazard_cells_ever_crossed}"),
-        ("Replans triggered", f"{replan_count}"),
-        ("Last replan compute time", f"{last_replan_ms:.3f} ms"),
+        ("HAZARD CELLS CROSSED", f"{hazard_cells_ever_crossed}"),
+        ("REPLANS TRIGGERED", f"{replan_count}"),
+        ("LAST REPLAN TIME", f"{last_replan_ms:.3f} ms"),
     ]
     col3 = [
-        ("Est. energy used (illustrative)", f"{energy:.1f} units"),
-        ("Remaining route status", "HAZARD AHEAD" if hazard_ahead else "Clear"),
+        ("EST. ENERGY (illustrative)", f"{energy:.1f} units"),
+        ("ROUTE STATUS", "HAZARD AHEAD" if hazard_ahead else "CLEAR"),
     ]
 
     def draw_column(items, x):
-        y = GRID_HEIGHT + 8
+        y = GRID_HEIGHT + 10
         for label, value in items:
             label_surf = font_tiny.render(label, True, DASHBOARD_LABEL_COLOR)
-            value_surf = font_small.render(value, True, DASHBOARD_VALUE_COLOR)
+            value_color = WARNING_COLOR if (label == "ROUTE STATUS" and hazard_ahead) else DASHBOARD_VALUE_COLOR
+            value_surf = font.render(value, True, value_color)
             screen.blit(label_surf, (x, y))
-            screen.blit(value_surf, (x, y + 14))
-            y += 32
+            screen.blit(value_surf, (x, y + 15))
+            y += 33
 
-    draw_column(col1, 14)
-    draw_column(col2, 280)
-    draw_column(col3, 560)
+    draw_column(col1, 16)
+    draw_column(col2, 290)
+    draw_column(col3, 570)
 
     caption = font_tiny.render(
         "Energy is illustrative: proportional to path cost, not a calibrated power model.",
-        True, (110, 110, 120)
+        True, (100, 100, 112)
     )
-    screen.blit(caption, (14, HEIGHT - 16))
+    screen.blit(caption, (16, HEIGHT - 18))
 
 # ============================================================
-#                      MAIN VISUALIZATION
+#              LEGEND
 # ============================================================
+
+def draw_legend():
+    """Small always-visible legend in the top-right corner of the grid area."""
+    items = [
+        (START_COLOR, "Start"),
+        (GOAL_COLOR, "Goal"),
+        (DRONE_COLOR, "Drone (level flight)"),
+        (DRONE_CLIMB_COLOR, "Drone (climbing/descending)"),
+        (OBSTACLE_FULL_COLOR, "Obstacle (all altitudes)"),
+        (OBSTACLE_PARTIAL_COLOR, "Obstacle (some altitudes)"),
+        (ASH_COLOR[:3], "Volcanic ash (moving)"),
+        (TURBULENCE_COLOR[:3], "Turbulence"),
+    ]
+
+    padding = 10
+    row_height = 20
+    box_width = 230
+    box_height = padding * 2 + row_height * len(items)
+    box = pygame.Rect(GRID_WIDTH - box_width - 12, 12, box_width, box_height)
+
+    legend_surface = pygame.Surface((box.width, box.height), pygame.SRCALPHA)
+    legend_surface.fill((*LEGEND_BG_COLOR, 210))
+    screen.blit(legend_surface, box.topleft)
+    pygame.draw.rect(screen, PANEL_AXIS_COLOR, box, 1)
+
+    y = box.top + padding
+    for color, label in items:
+        pygame.draw.rect(screen, color, (box.left + padding, y + 4, 12, 12))
+        text = font_tiny.render(label, True, TEXT_MAIN)
+        screen.blit(text, (box.left + padding + 20, y))
+        y += row_height
+
+# ============================================================
+#              MAIN VISUALIZATION
+# ============================================================
+
+def ease_in_out(t):
+    """Smooth acceleration/deceleration instead of constant linear speed."""
+    return 0.5 - 0.5 * math.cos(t * math.pi)
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -453,8 +497,8 @@ def draw_wind_indicator():
     tip = (ax + dx * 40, ay + dy * 40)
     pygame.draw.line(screen, WIND_ARROW_COLOR, (ax, ay), tip, 3)
     pygame.draw.circle(screen, WIND_ARROW_COLOR, tip, 5)
-    label = font_small.render("WIND", True, WIND_ARROW_COLOR)
-    screen.blit(label, (ax - 15, ay + 12))
+    label = font_tiny.render("WIND", True, WIND_ARROW_COLOR)
+    screen.blit(label, (ax - 14, ay + 12))
 
 def draw_path(hazard_ahead):
     color = HAZARD_PATH_COLOR if hazard_ahead else PATH_COLOR
@@ -463,18 +507,18 @@ def draw_path(hazard_ahead):
 
 def draw_hazard_status(hazard_ahead, hazard_cells):
     if hazard_ahead:
-        msg = f"HAZARD AHEAD -- {len(hazard_cells)} cell(s) on remaining route"
+        msg = f"HAZARD AHEAD  --  {len(hazard_cells)} cell(s) on remaining route"
         surf = font.render(msg, True, WARNING_COLOR)
     else:
         msg = "Remaining route: clear"
         surf = font.render(msg, True, SAFE_COLOR)
-    screen.blit(surf, (10, 40))
+    screen.blit(surf, (12, 44))
 
 def draw_replan_stats(flash):
-    color = REPLAN_FLASH_COLOR if flash else (200, 200, 210)
-    msg = f"Replans: {replan_count}   Last replan time: {last_replan_ms:.3f} ms"
+    color = REPLAN_FLASH_COLOR if flash else (190, 190, 205)
+    msg = f"Replans: {replan_count}    Last replan: {last_replan_ms:.3f} ms"
     surf = font_small.render(msg, True, color)
-    screen.blit(surf, (10, 68))
+    screen.blit(surf, (12, 74))
 
 # --- Drone movement state ---
 current_segment = 0
@@ -487,18 +531,15 @@ while running:
         if event.type == pygame.QUIT:
             running = False
 
-    # --- Advance ash drift ---
     tick_counter += 1
     if tick_counter >= ASH_TICK_INTERVAL:
         tick_counter = 0
         update_ash_drift()
 
-    # --- Advance drone along its CURRENT path ---
     if current_segment < len(path) - 1:
         progress += speed
         if progress >= 1.0:
             progress = 0.0
-            # Count hazard exposure exactly once, at the moment of arriving at a new waypoint
             if current_segment != last_counted_segment:
                 if in_any_hazard(path[current_segment]):
                     hazard_cells_ever_crossed += 1
@@ -509,15 +550,15 @@ while running:
     if current_segment < len(path) - 1:
         start_point = pixel_path[current_segment]
         end_point = pixel_path[current_segment + 1]
-        drone_x = lerp(start_point[0], end_point[0], progress)
-        drone_y = lerp(start_point[1], end_point[1], progress)
+        eased_progress = ease_in_out(progress)  # smoother motion, same underlying timing
+        drone_x = lerp(start_point[0], end_point[0], eased_progress)
+        drone_y = lerp(start_point[1], end_point[1], eased_progress)
         current_z = path[current_segment][2]
         is_climbing = path[current_segment][2] != path[current_segment + 1][2]
     else:
         drone_x, drone_y = pixel_path[-1]
         current_z = path[-1][2]
 
-    # --- Hazard detection on the REMAINING route ---
     hazard_ahead, hazard_cells = detect_hazard_ahead(path, current_segment)
 
     if hazard_ahead and not hazard_was_detected:
@@ -545,20 +586,28 @@ while running:
     pygame.draw.circle(screen, GOAL_COLOR, pixel_path[-1], 10)
 
     drone_color = DRONE_CLIMB_COLOR if is_climbing else DRONE_COLOR
+    # Subtle glow ring behind the drone for a slightly more polished look
+    glow_surface = pygame.Surface((28, 28), pygame.SRCALPHA)
+    pygame.draw.circle(glow_surface, (*drone_color, 60), (14, 14), 14)
+    screen.blit(glow_surface, (int(drone_x) - 14, int(drone_y) - 14))
     pygame.draw.circle(screen, drone_color, (int(drone_x), int(drone_y)), 8)
 
-    label = f"Altitude (z): {current_z}" + ("  [CLIMBING/DESCENDING]" if is_climbing else "")
-    text_surface = font.render(label, True, (220, 220, 220))
-    screen.blit(text_surface, (10, 10))
+    title_label = font_title.render("Adaptive Flight-Path Replanner", True, TEXT_MAIN)
+    screen.blit(title_label, (12, 10))
+
+    alt_label = font_small.render(
+        f"Altitude z={current_z}" + ("  (climbing/descending)" if is_climbing else ""),
+        True, (190, 190, 205)
+    )
+    screen.blit(alt_label, (12, GRID_HEIGHT - 26))
 
     draw_hazard_status(hazard_ahead, hazard_cells)
     draw_replan_stats(replan_flash_timer > 0)
+    draw_legend()
 
-    # --- Drawing: side panel ---
     draw_altitude_panel()
     draw_altitude_marker(current_segment, progress, current_z)
 
-    # --- Drawing: dashboard ---
     draw_dashboard(hazard_ahead)
 
     pygame.display.flip()
