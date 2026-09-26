@@ -1,13 +1,16 @@
 import pygame
+import heapq
 
 pygame.init()
 
 # --- Window and grid settings ---
 WIDTH, HEIGHT = 800, 600
 CELL_SIZE = 40
+GRID_COLS = WIDTH // CELL_SIZE   # 20
+GRID_ROWS = HEIGHT // CELL_SIZE  # 15
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Drone Replanner - Stage 3")
+pygame.display.set_caption("Drone Replanner - Stage 4")
 clock = pygame.time.Clock()
 
 # --- Colors ---
@@ -19,26 +22,79 @@ DRONE_COLOR = (90, 160, 230)
 PATH_COLOR = (120, 120, 160)
 OBSTACLE_COLOR = (100, 60, 60)
 
-# --- Obstacles: a set of blocked grid cells ---
-# This is the data A* will check against in Stage 4.
+# --- Obstacles ---
 obstacles = {
     (5, 2), (5, 3), (5, 4), (5, 5),
     (10, 6), (10, 7), (10, 8), (10, 9), (10, 10),
     (14, 2), (15, 2), (16, 2),
 }
 
-# --- Hardcoded path (same as Stage 2 — deliberately NOT avoiding obstacles yet) ---
-path = [
-    (1, 1),
-    (4, 1),
-    (4, 5),
-    (8, 5),
-    (8, 9),
-    (13, 9),
-    (13, 3),
-    (18, 3),
-    (18, 13),
-]
+start_cell = (1, 1)
+goal_cell = (18, 13)
+
+# ============================================================
+#                      A* PATHFINDING
+# ============================================================
+
+def heuristic(a, b):
+    """Manhattan distance: estimated cost from cell a to cell b, ignoring obstacles."""
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+def get_neighbors(cell):
+    """Return valid neighboring cells (up/down/left/right), skipping obstacles and out-of-bounds."""
+    col, row = cell
+    candidates = [(col + 1, row), (col - 1, row), (col, row + 1), (col, row - 1)]
+    valid = []
+    for c in candidates:
+        cx, cy = c
+        if 0 <= cx < GRID_COLS and 0 <= cy < GRID_ROWS and c not in obstacles:
+            valid.append(c)
+    return valid
+
+def reconstruct_path(came_from, current):
+    """Walk backwards from goal to start using the came_from map, then reverse it."""
+    path = [current]
+    while current in came_from:
+        current = came_from[current]
+        path.append(current)
+    path.reverse()
+    return path
+
+def a_star(start, goal):
+    """Return the list of cells from start to goal (inclusive), or None if no path exists."""
+    open_set = []
+    heapq.heappush(open_set, (0, start))   # (f_score, cell)
+
+    came_from = {}
+    g_score = {start: 0}
+
+    while open_set:
+        _, current = heapq.heappop(open_set)
+
+        if current == goal:
+            return reconstruct_path(came_from, current)
+
+        for neighbor in get_neighbors(current):
+            tentative_g = g_score[current] + 1  # every move costs 1 for now
+
+            if neighbor not in g_score or tentative_g < g_score[neighbor]:
+                g_score[neighbor] = tentative_g
+                f_score = tentative_g + heuristic(neighbor, goal)
+                heapq.heappush(open_set, (f_score, neighbor))
+                came_from[neighbor] = current
+
+    return None  # no path found
+
+# --- Compute the path once, at startup ---
+path = a_star(start_cell, goal_cell)
+
+if path is None:
+    print("WARNING: No path found between start and goal!")
+    path = [start_cell]  # fallback so the rest of the code doesn't crash
+
+# ============================================================
+#                      VISUALIZATION
+# ============================================================
 
 def grid_to_pixel(cell):
     col, row = cell
