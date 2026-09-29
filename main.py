@@ -93,49 +93,66 @@ def mouse_canvas_pos():
 
 clock = pygame.time.Clock()
 
+# UI-only typography. Logic/state/pathfinding is unchanged.
 font_title = pygame.font.SysFont("Consolas", 22, bold=True)
-font = pygame.font.SysFont("Consolas", 18, bold=True)
-font_small = pygame.font.SysFont("Consolas", 15, bold=True)
-font_tiny = pygame.font.SysFont("Consolas", 12, bold=True)
-font_micro = pygame.font.SysFont("Consolas", 10, bold=True)
+font = pygame.font.SysFont("Consolas", 17, bold=True)
+font_small = pygame.font.SysFont("Consolas", 14, bold=True)
+font_tiny = pygame.font.SysFont("Consolas", 11, bold=True)
+font_micro = pygame.font.SysFont("Consolas", 9, bold=True)
 
-# Military / HUD palette
-BG_COLOR = (14, 17, 13)
-GRID_COLOR = (36, 43, 31)
-START_COLOR = (108, 176, 84)
-GOAL_COLOR = (214, 69, 55)
-DRONE_COLOR = (245, 166, 35)
-DRONE_CLIMB_COLOR = (255, 214, 92)
-PATH_COLOR = (90, 102, 74)
-MAP_PATH_COLOR = (55, 125, 235)
-HAZARD_PATH_COLOR = (214, 69, 55)
-OLD_PATH_COLOR = (205, 160, 50)
-OBSTACLE_FULL_COLOR = (74, 46, 34)
-OBSTACLE_PARTIAL_COLOR = (120, 96, 46)
-PANEL_BG_COLOR = (20, 23, 17)
-PANEL_LINE_COLOR = (245, 166, 35)
-PANEL_AXIS_COLOR = (70, 78, 58)
-PANEL_MARKER_COLOR = (255, 214, 92)
-WIND_ARROW_COLOR = (140, 190, 160)
-WARNING_COLOR = (214, 69, 55)
-SAFE_COLOR = (108, 176, 84)
-REPLAN_FLASH_COLOR = (255, 214, 92)
-DASHBOARD_BG_COLOR = (12, 14, 10)
-DASHBOARD_LABEL_COLOR = (140, 150, 120)
-DASHBOARD_VALUE_COLOR = (222, 226, 200)
-TEXT_MAIN = (206, 214, 186)
-LEGEND_BG_COLOR = (20, 23, 17)
-BUTTON_COLOR = (40, 46, 33)
-BUTTON_ACTIVE_COLOR = (96, 118, 40)
-BUTTON_START_COLOR = (108, 176, 84)
-BUTTON_OBSTACLE_COLOR = (120, 70, 40)
-BUTTON_DANGER_COLOR = (100, 55, 55)
-TURB_LOW = (80, 165, 165, 75)
-TURB_MODERATE = (45, 150, 175, 105)
-TURB_HIGH = (30, 130, 175, 145)
-ASH_LOW = (168, 138, 58, 75)
-ASH_MODERATE = (190, 135, 45, 110)
-ASH_HIGH = (210, 115, 35, 145)
+# ============================================================
+# UNIFORM MILITARY / COMMAND-HUD PALETTE — UI ONLY
+# ============================================================
+BG_COLOR = (10, 15, 11)
+GRID_COLOR = (29, 48, 31)
+START_COLOR = (126, 184, 82)
+GOAL_COLOR = (184, 70, 58)
+DRONE_COLOR = (224, 176, 64)
+DRONE_CLIMB_COLOR = (192, 210, 82)
+PATH_COLOR = (76, 112, 73)
+MAP_PATH_COLOR = (91, 154, 108)
+HAZARD_PATH_COLOR = (184, 70, 58)
+OLD_PATH_COLOR = (166, 132, 55)
+OBSTACLE_FULL_COLOR = (69, 55, 38)
+OBSTACLE_PARTIAL_COLOR = (101, 88, 47)
+
+PANEL_BG_COLOR = (17, 25, 18)
+PANEL_LINE_COLOR = (151, 169, 77)
+PANEL_AXIS_COLOR = (67, 91, 62)
+PANEL_MARKER_COLOR = (197, 215, 86)
+WIND_ARROW_COLOR = (113, 157, 112)
+WARNING_COLOR = (190, 73, 60)
+SAFE_COLOR = (126, 184, 82)
+REPLAN_FLASH_COLOR = (198, 184, 67)
+
+DASHBOARD_BG_COLOR = (8, 13, 9)
+DASHBOARD_LABEL_COLOR = (119, 143, 113)
+DASHBOARD_VALUE_COLOR = (204, 218, 181)
+TEXT_MAIN = (191, 207, 174)
+LEGEND_BG_COLOR = (15, 23, 16)
+
+BUTTON_COLOR = (30, 48, 32)
+BUTTON_ACTIVE_COLOR = (73, 101, 47)
+BUTTON_START_COLOR = (91, 137, 65)
+BUTTON_OBSTACLE_COLOR = (83, 67, 42)
+BUTTON_DANGER_COLOR = (84, 48, 43)
+
+# Hazard overlays retain their meaning but fit the green command-HUD shell.
+TURB_LOW = (80, 145, 105, 55)
+TURB_MODERATE = (67, 132, 92, 90)
+TURB_HIGH = (53, 111, 78, 125)
+ASH_LOW = (150, 127, 58, 60)
+ASH_MODERATE = (160, 112, 47, 95)
+ASH_HIGH = (177, 91, 42, 125)
+
+# Shared UI geometry.
+UI_RADIUS = 4
+UI_BORDER = (83, 108, 72)
+UI_BORDER_SOFT = (47, 70, 50)
+UI_PANEL_SHADOW = (5, 9, 6)
+UI_SECTION = (119, 145, 73)
+UI_MUTED = (111, 130, 104)
+UI_WHITE = (220, 230, 205)
 
 # ============================================================
 # SHARED STATE / HELPERS
@@ -1829,13 +1846,16 @@ def draw_altitude_panel(path, hazards_to_draw, obstacles_to_draw=None, is_map=Fa
     if obstacles_to_draw is None:
         obstacles_to_draw = map_obstacles if is_map else obstacles
 
-    pygame.draw.rect(screen, PANEL_BG_COLOR, (GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT))
-    pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+    panel_box = pygame.Rect(GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT)
+    pygame.draw.rect(screen, UI_PANEL_SHADOW, panel_box.move(-3, 0))
+    pygame.draw.rect(screen, PANEL_BG_COLOR, panel_box)
+    pygame.draw.line(screen, PANEL_LINE_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+    draw_hud_corners(screen, pygame.Rect(GRID_WIDTH + 5, 5, PANEL_WIDTH - 10, GRID_HEIGHT - 10),
+                     UI_BORDER, length=12, thickness=1)
 
-    title = font_title.render("Altitude / Threat Profile", True, TEXT_MAIN)
+    title = font_title.render("ALTITUDE / THREAT PROFILE", True, TEXT_MAIN)
     screen.blit(title, (GRID_WIDTH + 14, 20))
-    subtitle = font_micro.render("ACTIVE ROUTE • threat extent shown at route intercept", True,
-                                 (145, 150, 135))
+    subtitle = font_micro.render("ACTIVE ROUTE  •  THREAT EXTENT / ALTITUDE", True, UI_MUTED)
     screen.blit(subtitle, (GRID_WIDTH + 14, 47))
 
     # Plot geometry. The existing panel_rect is deliberately kept inset from the
@@ -2152,7 +2172,8 @@ def draw_legend(is_map=False):
     layer = pygame.Surface(box.size, pygame.SRCALPHA)
     layer.fill((*LEGEND_BG_COLOR, 205))
     screen.blit(layer, box.topleft)
-    pygame.draw.rect(screen, PANEL_AXIS_COLOR, box, 1)
+    pygame.draw.rect(screen, UI_BORDER, box, 1, border_radius=UI_RADIUS)
+    draw_hud_corners(screen, box, UI_BORDER, length=7, thickness=1)
     y = 8
     for color, label in items:
         pygame.draw.rect(screen, color, (box.left + 8, box.top + y + 3, 11, 11))
@@ -2162,7 +2183,8 @@ def draw_legend(is_map=False):
 
 def draw_dashboard(is_map=False):
     pygame.draw.rect(screen, DASHBOARD_BG_COLOR, dashboard_rect)
-    pygame.draw.line(screen, PANEL_AXIS_COLOR, (0, GRID_HEIGHT), (WIDTH, GRID_HEIGHT), 2)
+    pygame.draw.line(screen, PANEL_LINE_COLOR, (0, GRID_HEIGHT), (WIDTH, GRID_HEIGHT), 2)
+    pygame.draw.line(screen, UI_BORDER_SOFT, (0, GRID_HEIGHT + 3), (WIDTH, GRID_HEIGHT + 3), 1)
     if is_map:
         elapsed = mission_elapsed(map_mission_start_ticks, map_mission_end_ticks, map_mission_complete)
         cost = map_path_cost(map_path)
@@ -2196,8 +2218,8 @@ def draw_dashboard(is_map=False):
                 value_color = SAFE_COLOR if complete else (WARNING_COLOR if "HAZARD" in value else DASHBOARD_VALUE_COLOR)
             screen.blit(font_small.render(value, True, value_color), (x, y + 14))
             y += 31
-    screen.blit(font_micro.render("A* is invoked only after live hazard detection. Energy/cost are illustrative.", True, (100, 100, 112)), (16, HEIGHT - 17))
-    screen.blit(font_micro.render("F11 fullscreen  |  R reset flight  |  P report  |  M map/grid", True, (120, 120, 135)), (WIDTH - 330, HEIGHT - 17))
+    screen.blit(font_micro.render("A* is invoked only after live hazard detection. Energy/cost are illustrative.", True, UI_MUTED), (16, HEIGHT - 17))
+    screen.blit(font_micro.render("F11 fullscreen  |  R reset flight  |  P report  |  M map/grid", True, UI_MUTED), (WIDTH - 330, HEIGHT - 17))
 
 
 def draw_report(is_map=False):
@@ -2231,8 +2253,9 @@ def draw_report(is_map=False):
     card_w = 480
     card_h = 64 + 30 * len(rows)
     card = pygame.Rect((WIDTH - card_w) // 2, (HEIGHT - card_h) // 2, card_w, card_h)
-    pygame.draw.rect(screen, PANEL_BG_COLOR, card)
-    pygame.draw.rect(screen, PANEL_AXIS_COLOR, card, 2)
+    pygame.draw.rect(screen, UI_PANEL_SHADOW, card.move(5, 5), border_radius=UI_RADIUS)
+    pygame.draw.rect(screen, PANEL_BG_COLOR, card, border_radius=UI_RADIUS)
+    pygame.draw.rect(screen, PANEL_LINE_COLOR, card, 2, border_radius=UI_RADIUS)
     draw_hud_corners(screen, card, BUTTON_ACTIVE_COLOR, length=18)
     title = font_title.render("MISSION PERFORMANCE REPORT", True, TEXT_MAIN)
     screen.blit(title, (card.centerx - title.get_width() // 2, card.y + 14))
@@ -2257,9 +2280,9 @@ def draw_banner_and_common_text(is_map=False):
     title = "Adaptive Flight-Path Replanner"
     subtitle = "REAL-TIME COURSE CORRECTION • SENSOR RANGE 6 CELLS"
     screen.blit(font_title.render(title, True, TEXT_MAIN), (12, 9))
-    screen.blit(font_micro.render(subtitle, True, (170, 175, 160)), (12, 33))
+    screen.blit(font_micro.render(subtitle, True, UI_MUTED), (12, 33))
     status = grid_setup_message if sim_state == "SETUP" else "LIVE SENSOR: scanning ahead"
-    screen.blit(font_tiny.render(status[:100], True, (180, 185, 170)), (12, 56))
+    screen.blit(font_tiny.render(status[:100], True, UI_MUTED), (12, 56))
     draw_event_banner()
 
 
@@ -2273,12 +2296,21 @@ dashboard_rect = pygame.Rect(0, GRID_HEIGHT, WIDTH, DASHBOARD_HEIGHT)
 
 def button_on_surface(panel, buttons, x, y, label, action, w=306, h=28,
                       target=None, active=False, color=None, text_color=TEXT_MAIN):
+    # Presentation-only helper: same rect/action bookkeeping, upgraded command-console styling.
     rect = pygame.Rect(x, y, w, h)
     bg = color if color is not None else (BUTTON_ACTIVE_COLOR if active else BUTTON_COLOR)
-    pygame.draw.rect(panel, bg, rect)
-    pygame.draw.rect(panel, PANEL_AXIS_COLOR, rect, 1)
+    border = PANEL_LINE_COLOR if active else UI_BORDER
+    pygame.draw.rect(panel, UI_PANEL_SHADOW, rect.move(2, 2), border_radius=UI_RADIUS)
+    pygame.draw.rect(panel, bg, rect, border_radius=UI_RADIUS)
+    pygame.draw.rect(panel, border, rect, 1, border_radius=UI_RADIUS)
+    # Small left status marker makes active controls immediately readable.
+    if active:
+        pygame.draw.rect(panel, PANEL_MARKER_COLOR, (rect.x + 5, rect.y + 7, 3, rect.height - 14), border_radius=1)
+        tx = rect.x + 14
+    else:
+        tx = rect.x + 9
     txt = font_small.render(label, True, text_color)
-    panel.blit(txt, (rect.x + 7, rect.y + (rect.height - txt.get_height()) // 2))
+    panel.blit(txt, (tx, rect.y + (rect.height - txt.get_height()) // 2))
     buttons.append((rect, action, target))
     return y + h + 6
 
@@ -2292,18 +2324,20 @@ def draw_scrollbar(scroll, content_height, x):
     visible_h = GRID_HEIGHT
     if content_height <= visible_h:
         return
-    track = pygame.Rect(x, 5, 5, visible_h - 10)
-    pygame.draw.rect(screen, (45, 46, 40), track)
+    track = pygame.Rect(x, 6, 6, visible_h - 12)
+    pygame.draw.rect(screen, UI_BORDER_SOFT, track, border_radius=3)
     thumb_h = max(44, int(track.height * visible_h / content_height))
     max_scroll = content_height - visible_h
     thumb_y = track.y + int((track.height - thumb_h) * (scroll / max_scroll))
-    pygame.draw.rect(screen, BUTTON_ACTIVE_COLOR, (track.x, thumb_y, track.width, thumb_h))
+    pygame.draw.rect(screen, BUTTON_ACTIVE_COLOR,
+                     (track.x, thumb_y, track.width, thumb_h), border_radius=3)
 
 
 def draw_grid_setup_panel():
     global grid_panel_scroll, grid_panel_content_height
     panel = pygame.Surface((PANEL_WIDTH, 3600), pygame.SRCALPHA)
     panel.fill(PANEL_BG_COLOR)
+    pygame.draw.rect(panel, UI_BORDER_SOFT, (5, 5, PANEL_WIDTH - 10, 3590), 1, border_radius=UI_RADIUS)
     buttons = []
     x, y = 12, 12
 
@@ -2369,7 +2403,7 @@ def draw_grid_setup_panel():
 
     hsel = get_selected_hazard()
     if hsel:
-        y = label_on_surface(panel, x, y + 2, f"EDITING HAZARD #{hsel['id']}", (185, 185, 200), 16)
+        y = label_on_surface(panel, x, y + 2, f"EDITING HAZARD #{hsel['id']}", UI_SECTION, 16)
         y = button_on_surface(panel, buttons, x, y, f"SEVERITY / EXTENT: {hazard_label(hsel).replace('ASH D', 'ASH D')}", "grid_cycle_hazard_severity")
         y = button_on_surface(panel, buttons, x, y, f"MIN ALTITUDE: {alt_ft(hsel['z_min']):,} FT", "grid_cycle_hazard_minz")
         y = button_on_surface(panel, buttons, x, y, f"MAX ALTITUDE: {alt_ft(hsel['z_max']):,} FT", "grid_cycle_hazard_maxz")
@@ -2390,7 +2424,7 @@ def draw_grid_setup_panel():
 
     osel = get_selected_obstacle()
     if osel:
-        y = label_on_surface(panel, x, y + 2, f"EDITING OBSTACLE #{osel['id']}", (185, 185, 200), 16)
+        y = label_on_surface(panel, x, y + 2, f"EDITING OBSTACLE #{osel['id']}", UI_SECTION, 16)
         y = button_on_surface(panel, buttons, x, y, f"MIN ALTITUDE: {alt_ft(osel['z_min']):,} FT", "grid_cycle_obstacle_minz")
         y = button_on_surface(panel, buttons, x, y, f"MAX ALTITUDE: {alt_ft(osel['z_max']):,} FT", "grid_cycle_obstacle_maxz")
 
@@ -2405,13 +2439,13 @@ def draw_grid_setup_panel():
     panel.blit(font_small.render("MISSION", True, TEXT_MAIN), (x, y)); y += 22
     y = button_on_surface(panel, buttons, x, y, "LAUNCH LIVE-REPLAN MISSION", "grid_start_sim", color=BUTTON_START_COLOR, text_color=(255, 255, 255), h=36)
     y = button_on_surface(panel, buttons, x, y, "SWITCH TO REAL-WORLD MAP", "switch_map")
-    y = label_on_surface(panel, x, y, "M: toggle mode • F11 fullscreen • wheel: panel scroll", (145, 145, 160), dy=16)
+    y = label_on_surface(panel, x, y, "M: toggle mode • F11 fullscreen • wheel: panel scroll", UI_MUTED, dy=16)
 
     grid_panel_content_height = y + 12
     max_scroll = max(0, grid_panel_content_height - GRID_HEIGHT)
     grid_panel_scroll = max(0, min(grid_panel_scroll, max_scroll))
     screen.blit(panel, (GRID_WIDTH, 0), area=pygame.Rect(0, grid_panel_scroll, PANEL_WIDTH, GRID_HEIGHT))
-    pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+    pygame.draw.line(screen, PANEL_LINE_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
     draw_scrollbar(grid_panel_scroll, grid_panel_content_height, GRID_WIDTH + PANEL_WIDTH - 7)
 
     visible = pygame.Rect(GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT)
@@ -2425,6 +2459,7 @@ def draw_map_setup_panel():
     global map_panel_scroll, map_panel_content_height
     panel = pygame.Surface((PANEL_WIDTH, 4200), pygame.SRCALPHA)
     panel.fill(PANEL_BG_COLOR)
+    pygame.draw.rect(panel, UI_BORDER_SOFT, (5, 5, PANEL_WIDTH - 10, 4190), 1, border_radius=UI_RADIUS)
     buttons = []
     x, y = 12, 12
     panel.blit(font_title.render("REAL-WORLD MAP PLANNING", True, TEXT_MAIN), (x, y)); y += 30
@@ -2491,7 +2526,7 @@ def draw_map_setup_panel():
 
     hsel = get_selected_map_hazard()
     if hsel:
-        y = label_on_surface(panel, x, y + 2, f"EDITING HAZARD #{hsel['id']}", (185, 185, 200), 16)
+        y = label_on_surface(panel, x, y + 2, f"EDITING HAZARD #{hsel['id']}", UI_SECTION, 16)
         y = button_on_surface(panel, buttons, x, y, f"SEVERITY / EXTENT: {hazard_label(hsel)}", "map_cycle_hazard_severity")
         y = button_on_surface(panel, buttons, x, y, f"MIN ALTITUDE: {alt_ft(hsel['z_min']):,} FT", "map_cycle_hazard_minz")
         y = button_on_surface(panel, buttons, x, y, f"MAX ALTITUDE: {alt_ft(hsel['z_max']):,} FT", "map_cycle_hazard_maxz")
@@ -2512,7 +2547,7 @@ def draw_map_setup_panel():
 
     osel = get_selected_map_obstacle()
     if osel:
-        y = label_on_surface(panel, x, y + 2, f"EDITING OBSTACLE #{osel['id']}", (185, 185, 200), 16)
+        y = label_on_surface(panel, x, y + 2, f"EDITING OBSTACLE #{osel['id']}", UI_SECTION, 16)
         y = button_on_surface(panel, buttons, x, y, f"MIN ALTITUDE: {alt_ft(osel['z_min']):,} FT", "map_cycle_obstacle_minz")
         y = button_on_surface(panel, buttons, x, y, f"MAX ALTITUDE: {alt_ft(osel['z_max']):,} FT", "map_cycle_obstacle_maxz")
 
@@ -2526,13 +2561,13 @@ def draw_map_setup_panel():
     y += 6
     y = button_on_surface(panel, buttons, x, y, "LAUNCH LIVE-REPLAN MAP MISSION", "map_start_sim", color=BUTTON_START_COLOR, text_color=(255, 255, 255), h=36)
     y = button_on_surface(panel, buttons, x, y, "SWITCH TO GRID MODE", "switch_grid")
-    y = label_on_surface(panel, x, y, map_status[:90], WARNING_COLOR if "fail" in map_status.lower() else (145, 145, 160), 16)
+    y = label_on_surface(panel, x, y, map_status[:90], WARNING_COLOR if "fail" in map_status.lower() else UI_MUTED, 16)
 
     map_panel_content_height = y + 12
     max_scroll = max(0, map_panel_content_height - GRID_HEIGHT)
     map_panel_scroll = max(0, min(map_panel_scroll, max_scroll))
     screen.blit(panel, (GRID_WIDTH, 0), area=pygame.Rect(0, map_panel_scroll, PANEL_WIDTH, GRID_HEIGHT))
-    pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+    pygame.draw.line(screen, PANEL_LINE_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
     draw_scrollbar(map_panel_scroll, map_panel_content_height, GRID_WIDTH + PANEL_WIDTH - 7)
     visible = pygame.Rect(GRID_WIDTH, 0, PANEL_WIDTH, GRID_HEIGHT)
     return [{"rect": pygame.Rect(GRID_WIDTH + r.x, r.y - map_panel_scroll, r.w, r.h),
@@ -2552,13 +2587,18 @@ def draw_start_screen():
     elapsed = time.perf_counter() - home_screen_started
     home_screen_ready = elapsed >= 1.15
 
-    screen.fill((7, 10, 8))
+    screen.fill((7, 12, 8))
 
     # Background grid / HUD texture
     for x in range(0, WIDTH, 40):
-        pygame.draw.line(screen, (18, 28, 20), (x, 0), (x, HEIGHT), 1)
+        pygame.draw.line(screen, (18, 35, 21), (x, 0), (x, HEIGHT), 1)
     for y in range(0, HEIGHT, 40):
-        pygame.draw.line(screen, (18, 28, 20), (0, y), (WIDTH, y), 1)
+        pygame.draw.line(screen, (18, 35, 21), (0, y), (WIDTH, y), 1)
+
+    # Outer command-console frame.
+    frame = pygame.Rect(28, 24, WIDTH - 56, HEIGHT - 48)
+    pygame.draw.rect(screen, UI_BORDER_SOFT, frame, 1, border_radius=UI_RADIUS)
+    draw_hud_corners(screen, frame, PANEL_LINE_COLOR, length=18, thickness=2)
 
     cx, cy = WIDTH // 2, 220
     pulse = 0.5 + 0.5 * math.sin(time.perf_counter() * 3.0)
@@ -2570,7 +2610,7 @@ def draw_start_screen():
     pygame.draw.line(screen, (108, 176, 84), (cx, cy - 34), (cx, cy + 34), 1)
 
     title = font_title.render("ADAPTIVE DRONE FLIGHT-REPLANNER", True, TEXT_MAIN)
-    subtitle = font_small.render("VOLCANIC ASH / TURBULENCE / OBSTACLE AVOIDANCE", True, (155, 175, 150))
+    subtitle = font_small.render("VOLCANIC ASH / TURBULENCE / OBSTACLE AVOIDANCE", True, UI_MUTED)
     screen.blit(title, (cx - title.get_width() // 2, 86))
     screen.blit(subtitle, (cx - subtitle.get_width() // 2, 118))
 
@@ -2609,13 +2649,13 @@ def draw_start_screen():
             {"rect": right, "action": "home_map", "target": None},
         ]
 
-        hint = font_tiny.render("Choose a simulation environment to begin", True, (145, 160, 145))
+        hint = font_tiny.render("Choose a simulation environment to begin", True, UI_MUTED)
         screen.blit(hint, (cx - hint.get_width() // 2, 525))
     else:
         loading = font_tiny.render("SYSTEM CHECK IN PROGRESS...", True, (120, 140, 120))
         screen.blit(loading, (cx - loading.get_width() // 2, 412))
 
-    footer = font_micro.render("ADAPTIVE REPLANNING DEMONSTRATOR  •  HACKATHON BUILD", True, (85, 105, 88))
+    footer = font_micro.render("ADAPTIVE REPLANNING DEMONSTRATOR  •  HACKATHON BUILD", True, UI_MUTED)
     screen.blit(footer, (cx - footer.get_width() // 2, HEIGHT - 36))
     return buttons
 
@@ -3048,7 +3088,7 @@ while running:
             draw_map_preview()
             active_buttons = draw_map_setup_panel()
             draw_banner_and_common_text(is_map=True)
-            hint = font_micro.render("MAP INPUT: drag to pan • wheel on map to zoom • wheel on right panel to scroll", True, (205, 205, 195))
+            hint = font_micro.render("MAP INPUT: drag to pan • wheel on map to zoom • wheel on right panel to scroll", True, TEXT_MAIN)
             screen.blit(hint, (MAP_WIDTH - hint.get_width() - 12, MAP_HEIGHT - 24))
         else:
             draw_real_map()
@@ -3088,7 +3128,7 @@ while running:
             draw_report(is_map=False)
 
     if sim_state == "SETUP":
-        pygame.draw.line(screen, PANEL_AXIS_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
+        pygame.draw.line(screen, PANEL_LINE_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, GRID_HEIGHT), 2)
     present()
     clock.tick(60)
 
