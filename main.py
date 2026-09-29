@@ -261,9 +261,10 @@ def hazard_cost(h):
 
 
 def hazard_requires_replan(h):
-    # LOW turbulence is a pass-through region. Ash is always an avoidance
-    # hazard; MODERATE/HIGH turbulence also requires avoidance.
-    return h["type"] == "ash" or h.get("severity", "HIGH") in ("MODERATE", "HIGH", 2, 3)
+    # Every turbulence zone and every ash zone is an avoidance volume.
+    # This keeps the live route from ever intentionally crossing a
+    # turbulence/ash cell while travelling to a waypoint.
+    return h["type"] in ("ash", "turbulence")
 
 
 def hazard_blocks_cell(cell, h):
@@ -877,11 +878,15 @@ def build_targets_map():
 
 
 def grid_route_for_leg(start, target):
-    return direct_path(start, target)
+    # Build the actual leg with the same 3-D obstacle/hazard constraints used
+    # by live replanning. The drone therefore starts each waypoint leg on a
+    # safe trajectory instead of following a hazard-blind straight line.
+    return grid_astar(start, target)
 
 
 def map_route_for_leg(start, target):
-    return direct_path(start, target)
+    # Map mode uses the same 3-D constrained planner as the live replan path.
+    return map_astar(start, target)
 
 
 def refresh_grid_pixel_path():
@@ -1651,7 +1656,7 @@ def start_grid_simulation():
     grid_show_report = False
     grid_mission_start_ticks = pygame.time.get_ticks()
     grid_mission_end_ticks = grid_mission_start_ticks
-    grid_setup_message = "LIVE SENSOR ENABLED — route will adapt only when hazards are detected."
+    grid_setup_message = "LIVE SENSOR ENABLED — obstacle, turbulence and ash avoidance active."
     sim_state = "RUNNING"
     announce("MISSION STARTED — LIVE HAZARD DETECTION ACTIVE", "safe", 1.8)
 
